@@ -1,0 +1,340 @@
+###Background
+Here I plot phenotype data
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+source("..\\scripts/01_objects__1.R")
+source("scripts/04_instime_plots.R")
+source("scripts/05_barplots.R")
+source("..\\scripts/essential_visualisations_JvG.R")
+
+load("data/pheno_data__5.RData")
+```
+
+
+###Cull blood glucose and counts
+```{r}
+#Set up parameters for different measures
+bloodgluc_vs_count_params <- list(
+  "bloodgluc" = list(measure = "bloodgluc",
+                     directory = "output/images/bloodgluc/all_strains/lplot_bloodgluc_allstrains_"),
+  "bloodgluc_frombase" = list(measure = "bloodgluc_frombase",
+                     directory = "output/images/bloodgluc/from_base/all_strains/lplot_bloodglucfrombase_allstrains_"),
+  "bloodcounts" = list(measure = "bloodcounts",
+                       directory = "output/images/bloodcounts/all_strains/lplot_bloodcounts_allstrains_")
+)
+
+#Set up parameters for different plot formats
+bloodplot_params <- list(
+  #Strain as column
+  list(summarise = F,
+       diet_shape = F,
+       width = 4, height = 2.5,
+       filename = "alldat_straincol",
+       facet = facet_grid(cols = vars(Strain), rows = vars(Diet))),
+  #Diet as column
+   list(summarise = F,
+       diet_shape = F,
+       width = 4, height = 2.5,
+       filename = "alldat_dietcol",
+       facet = facet_grid(rows = vars(Strain), cols = vars(Diet))),
+  #All in a row
+   list(summarise = F,
+       diet_shape = F,
+       width = 7, height = 1.5,
+       filename = "alldat_row",
+       facet = facet_grid(cols = vars(Strain, Diet))),
+  #Summarise, strain and diet in a row
+   list(summarise = T,
+       diet_shape = F,
+       width = 7, height = 1.5,
+       filename = "summ_row",
+       facet = facet_grid(cols = vars(Strain, Diet)))
+)
+
+#Plot by mapping over bloodgluc vs bloodcount and then over different plot types
+map(bloodgluc_vs_count_params,
+    function(y){
+      map(bloodplot_params,
+          function(x){
+            instime_lineplot_bloodmeasure(pheno_data[!is.na(pheno_data$bloodcounts_1min), ],
+                                          measure = y$measure,
+                                          diet_shape = x$diet_shape,
+                                          summarise = x$summarise) +
+              x$facet 
+              ggsave_pdfpng(paste(y$directory,
+                                  x$filename,
+                                  sep = ""),
+                    width = x$width, height = x$height)
+          })
+    })
+```
+
+
+###GTT
+
+Line plots
+```{r}
+#Set up parameters for different measures (GTT glucose and GTT insulin)
+GTT_glucvsins_params <- list(
+  list(measure = "postdiet_GTTgluc",
+       name = "gluc",
+       xaxis_breaks_manual = NULL),
+  list(measure = "postdiet_GTTins",
+       name = "ins",
+       xaxis_breaks_manual = NULL),
+  list(measure = "postdiet_GTTins",
+       name = "insfulltime",
+       xaxis_breaks_manual = c(0, 30, 60, 90))
+)
+
+#Set up parameters for different plots
+GTT_lineplot_args <- list(
+  #Diet as shape, in a row, summarised
+  list(
+    summarise = TRUE,
+    diet_shape = TRUE,
+    diet_shape_vals = c(21, 16),
+    facet = facet_grid(cols = vars(Strain)),
+    filename = "sum_row",
+    width = 6, height = 1.5
+  ),
+  #Diet as shape, in a row, individual values
+  list(
+    summarise = FALSE,
+    diet_shape = FALSE,
+    diet_shape_vals = c(16, 16),
+    facet = facet_grid(cols = vars(Strain, Diet)),
+    filename = "alldat_row",
+    width = 12,
+    height = 1.75
+  )
+)
+
+#Plot by mapping over gluc vs ins and then over different plot types
+map(GTT_glucvsins_params,
+    function(y){
+      map(GTT_lineplot_args,
+      function(x){
+        instime_lineplot_bloodmeasure(pheno_data,
+                                measure = y$measure,
+                                summarise = x$summarise,
+                                diet_shape = x$diet_shape,
+                                diet_shape_vals = x$diet_shape_vals,
+                                xaxis_breaks_manual = y$xaxis_breaks_manual) +
+          x$facet
+        ggsave_pdfpng(paste("output/images/GTT/curves/lplot_GTT",
+                            y$name,
+                            "curves_",
+                            x$filename,
+                            sep = ""),
+                      width = x$width,
+                      height = x$height)
+      })
+    })
+
+
+```
+
+###Bodyweight data
+```{r}
+#Lineplots
+#Summarised
+lineplot_bodyweight(pheno_data,
+                    summarise = TRUE,
+                    diet_shape = TRUE,
+                    diet_shape_vals = c(21, 16)) +
+  facet_grid(cols = vars(Strain))
+ggsave_pdfpng("output/images/bodyweight/lineplots/lplot_bodyweight_sum",
+              width = 5, height = 1.3)
+#All data
+lineplot_bodyweight(pheno_data,
+                    summarise = FALSE,
+                    diet_shape = FALSE,
+                    diet_shape_vals = c(21, 16)) +
+  facet_grid(cols = vars(Strain, Diet))
+ggsave_pdfpng("output/images/bodyweight/lineplots/lplot_bodyweight_alldat_row",
+              width = 8, height = 1.3)
+```
+
+
+###Bargraphs
+Diet vs Strain measures
+```{r}
+#Load in stats
+load("data/stats/StrainDiet_wholebody_tests.RData")
+#Arguments
+barplots_diet_args <- list(
+  list(value_col = "postdiet_adiposity",
+        yaxis_lab = "Adiposity (%)",
+        file = "output/images/bodycomp/bplot_adiposity"),
+  list(value_col = "sol_mass",
+        yaxis_lab = "Soleus ground mass (mg)",
+        file = "output/images/tissue_mass/bplot_sol_mass"),
+  list(value_col = "sol_prot_amount",
+        yaxis_lab = "Soleus protein (ug)",
+        file = "output/images/protein/bplot_sol_prot_amount"),
+  list(value_col = "postdiet_GTTgluc_AUC",
+        yaxis_lab = "GTT AUC (mM*min)",
+        file = "output/images/GTT/barplots/bplot_GTT_AUC"),
+  list(value_col = "postdiet_GTTgluc_AOC",
+        yaxis_lab = "GTT AOC (mM*min)",
+        file = "output/images/GTT/barplots/bplot_GTT_AOC"),
+  list(value_col = "postdiet_GTTgluc_0min",
+        yaxis_lab = "Fasting glucose (mM)",
+        file = "output/images/GTT/barplots/bplot_GTT_fastinggluc"),
+  list(value_col = "postdiet_GTTins_0min",
+        yaxis_lab = "Fasting insulin (ng/mL)",
+        file = "output/images/GTT/barplots/bplot_GTT_fastingins"),
+  list(value_col = "postdiet_GTTins_15min",
+        yaxis_lab = "GTT 15-minute insulin (ng/mL)",
+        file = "output/images/GTT/barplots/bplot_GTT_ins_15min"),
+  list(value_col = "postdiet_matsuda",
+        yaxis_lab = "Matsuda index",
+        file = "output/images/GTT/barplots/bplot_matsuda"),
+  list(value_col = "postdiet_HOMAIR",
+        yaxis_lab = "HOMA-IR",
+        file = "output/images/GTT/barplots/bplot_HOMAIR")
+)
+#Make plots
+map(barplots_diet_args, function(x){
+  barplot_diets_SEMpoints_siglabs(data = pheno_data,
+                      stat_summary = StrainDiet_wholebody_tests[[x$value_col]]$ttest$summary,
+                      value_col = x$value_col,
+                      yaxis_lab = x$yaxis_lab,
+                      file = x$file,
+                        width = 3,
+                        height = 2)
+})
+```
+
+
+Strain vs Diet vs Insulin measures
+```{r}
+###No stats
+#Set up arguments
+barplots_ins_nostats_args <- list(
+  #bloodcount values
+  list(value_col = "bloodcounts_rate",
+        yaxis_lab = "Blood tracer disappearance rate",
+        file = "output/images/bloodcounts/all_strains/bplot_bloodcountrate"),
+  list(value_col = "bloodcounts_Rsq",
+        yaxis_lab = "Blood tracer disappearance Rsquared",
+        file = "output/images/bloodcounts/all_strains/bplot_bloodcountRsq"),
+  list(value_col = "bloodcounts_initial",
+        yaxis_lab = "Predicted initial blood tracer (DPM/uL)",
+        file = "output/images/bloodcounts/all_strains/bplot_bloodcountinitial"),
+  #bloodgluc values
+  list(value_col = "bloodgluc_AOC",
+        yaxis_lab = "ITT AOC (mM*min)",
+        file = "output/images/bloodgluc/all_strains/barplots/bplot_bloodgluc_AOC"),
+  list(value_col = "bloodgluc_slope",
+        yaxis_lab = "Blood tracer disappearance Rsquared",
+        file = "output/images/bloodgluc/all_strains/barplots/bplot_bloodgluc_slope"),
+  #Tissue glucose uptake
+  #sol
+  list(value_col = "sol_p2DG_weightnorm_rate",
+        yaxis_lab = "2DG uptake (Ki/mg tissue)",
+        file = "output/images/tissue_GU/sol/barplots/sol_p2DG_weightnorm_rate"),
+  list(value_col = "sol_p2DG_protnorm_rate",
+        yaxis_lab = "2DG uptake (Ki/ug protein)",
+        file = "output/images/tissue_GU/sol/barplots/sol_p2DG_protnorm_rate"),
+  list(value_col = "sol_p2DG_weightnorm",
+        yaxis_lab = "2DG uptake (DPM/mg tissue)",
+        file = "output/images/tissue_GU/sol/barplots/sol_p2DG_weightnorm"),
+  list(value_col = "sol_p2DG_protnorm",
+        yaxis_lab = "2DG uptake (DPM/ug protein)",
+        file = "output/images/tissue_GU/sol/barplots/sol_p2DG_protnorm")
+)
+#Make plots
+map(barplots_ins_nostats_args, 
+    function(x){      
+      #Set up files
+      dir.create(x$file)
+      filename <- rev(strsplit(x$file, "/")[[1]])[1]
+      directory <- paste(x$file, "/", filename, sep = "")
+      #Make plots
+      barplot_ins_SEMpoints(data = pheno_data,
+                            value_col = x$value_col,
+                            yaxis_lab = x$yaxis_lab,
+                            file = paste(directory, "_basins", sep = ""),
+                            width = 5, height = 2)
+      barplot_diets_SEMpoints(data = pheno_data[pheno_data$Ins == "bas", ],
+                            value_col = x$value_col,
+                            yaxis_lab = x$yaxis_lab,
+                            file = paste(directory, "_bas", sep = ""),
+                            width = 3, height = 2)
+       barplot_diets_SEMpoints(data = pheno_data[pheno_data$Ins == "ins", ],
+                            value_col = x$value_col,
+                            yaxis_lab = x$yaxis_lab,
+                            file = paste(directory, "_ins", sep = ""),
+                            width = 3, height = 2)
+    })
+
+###With stats
+#I only plot basins and ins data. Stats are only for ins data
+#Load in stats
+load("data/stats/StrainDietIns_tests.RData")
+#Set up arguments
+barplots_ins_stats_args <- list(
+  #bloodcount values
+  list(value_col = "bloodcounts_rate",
+        yaxis_lab = "Blood tracer disappearance rate",
+        file = "output/images/bloodcounts/all_strains/bplot_bloodcountrate"),
+  #bloodgluc values
+  list(value_col = "bloodgluc_AOC",
+        yaxis_lab = "ITT AOC (mM*min)",
+        file = "output/images/bloodgluc/all_strains/barplots/bplot_bloodgluc_AOC"),
+  list(value_col = "bloodgluc_slope",
+        yaxis_lab = "Blood tracer disappearance Rsquared",
+        file = "output/images/bloodgluc/all_strains/barplots/bplot_bloodgluc_slope"),
+  #Tissue glucose uptake
+  list(value_col = "sol_p2DG_weightnorm_rate",
+        yaxis_lab = "2DG uptake (Ki/mg tissue)",
+        file = "output/images/tissue_GU/sol/barplots/sol_p2DG_weightnorm_rate")
+)
+#Make plots
+map(barplots_ins_stats_args,
+     function(x){
+        #Set up files
+        filename <- rev(strsplit(x$file, "/")[[1]])[1]
+        directory <- paste(x$file, "/", filename, sep = "")
+       #Set up test summary
+       test_summary <- StrainDietIns_tests[[x$value_col]]$ins$ttest$summary
+       #Make plots
+       barplot_ins_siglabs(pheno_data,
+                    value_col = x$value_col,
+                    yaxis_lab = x$yaxis_lab,
+                    test_summary)
+       ggsave_pdfpng(paste(directory, "_basins_alldat_inssiglabs", sep = ""),
+                     width = 5, height = 2)
+       barplot_diets_siglabs(pheno_data[pheno_data$Ins == "ins", ],
+                    value_col = x$value_col,
+                    yaxis_lab = x$yaxis_lab,
+                    test_summary)
+       ggsave_pdfpng(paste(directory, "_ins_alldat_inssiglabs", sep = ""),
+                     width = 3, height = 2)
+     })
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

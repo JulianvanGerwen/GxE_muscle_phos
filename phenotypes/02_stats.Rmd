@@ -1,0 +1,109 @@
+###Background
+Here i perform stats on phenotype data
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+source("..\\scripts/01_objects__1.R")
+source("scripts/06_stats.R")
+source("..\\scripts/essential_visualisations_JvG.R")
+
+load("data/pheno_data__5.RData")
+```
+
+###Comparing Strain and Diet
+Here I perform two-way ANOVAs of Strain*Diet and t-tests comparing diets within strains, and strains to B6 within diets
+```{r}
+###Whole body phenotypes
+StrainDiet_wholebody_phenos <- c("postdiet_adiposity",
+                                 "sol_mass",
+                                 "sol_prot_amount",
+                                 "bodyweight_final",
+                     "postdiet_GTTgluc_AUC",
+                     "postdiet_GTTgluc_AOC",
+                     "postdiet_GTTgluc_0min",
+                     "postdiet_GTTins_0min",
+                     "postdiet_GTTins_15min",
+                     "postdiet_matsuda",
+                     "postdiet_HOMAIR")
+names(StrainDiet_wholebody_phenos) <- StrainDiet_wholebody_phenos
+#Run tests
+StrainDiet_wholebody_tests <- map(StrainDiet_wholebody_phenos, ~ tests_strain_diet(pheno_data, .))
+#Make big summary tables
+StrainDiet_wholebody_tests_summary_tables <- list(
+  "aov" = test_summary_table(map(StrainDiet_wholebody_tests, ~.$aov)),
+  "ttest" = test_summary_table(map(StrainDiet_wholebody_tests, ~.$ttest),
+                               pval_col = "adj_p")
+)
+names(StrainDiet_wholebody_tests_summary_tables) <- c("aov", "ttest")
+#save
+save(StrainDiet_wholebody_tests, file = "output/data/stats/StrainDiet_wholebody_tests.RData")
+write.csv(StrainDiet_wholebody_tests_summary_tables$aov, 
+          file = "output/data/stats/StrainDiet_wholebody_tests_aov_summary_table.csv")
+write.csv(StrainDiet_wholebody_tests_summary_tables$ttest, 
+          file = "output/data/stats/StrainDiet_wholebody_tests_ttest_summary_table.csv")
+```
+
+
+###Strain, Diet, and Ins tests
+Here I perform tests comparing Strain and Diet within bas or ins data, and comparing bas to ins data
+```{r}
+###Set up data
+#Set up comparisons
+StrainDietIns_phenos <- c("bloodcounts_rate",
+                          "bloodgluc_AOC",
+                          "bloodgluc_slope",
+                          "sol_p2DG_weightnorm_rate")
+#Run tests
+StrainDietIns_tests <- map(StrainDietIns_phenos,
+                           ~tests_strain_diet_ins(pheno_data, .))
+names(StrainDietIns_tests) <- StrainDietIns_phenos
+#save
+save(StrainDietIns_tests,
+     file = "output/data/stats/StrainDietIns_tests.RData")
+
+
+###Summary tables
+basins_test_summaries <- sapply(c("ttest", "aov"),
+       function(x){
+         bas_summary <- 
+ins_summary <- map(StrainDietIns_tests,
+                    ~.$ins[[x]]) %>%
+                    test_summary_table()
+bas_summary <- map(StrainDietIns_tests,
+                    ~.$bas[[x]]) %>%
+                    test_summary_table()
+if (x == "ttest"){
+  basvsins_summary <- map(StrainDietIns_tests,
+                    ~.$basvsins) %>%
+                    test_summary_table()
+} else {
+  basvsins_summary <- NULL
+}
+
+basins_test_summary <- rbind(bas_summary, ins_summary, basvsins_summary)
+return(basins_test_summary)
+       })
+
+write.csv(basins_test_summaries$ttest, file = "output/data/stats/basins_ttest_summary.csv")
+write.csv(basins_test_summaries$aov, file = "output/data/stats/basins_aov_summary.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

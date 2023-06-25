@@ -1,0 +1,111 @@
+###Background
+Here I process and combine phenotype data
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/01_load_and_combine.R")
+source("scripts/02_bloodcountproc.R")
+source("scripts/03_GTTecho_weights_proc.R")
+source("scripts/07_tissuecount_proc.R")
+source("scripts/08_bloodgluc_proc.R")
+```
+
+
+
+###Load in, process, and combine
+```{r}
+###Read in
+id_data <- process_id_data("data/cull_order_and_animal_codes.csv")
+
+bloodgluc_data <- load_bloodgluc_data("data/GxE_muscle_phos_bloodgluc.csv") %>%
+  process_bloodgluc_data(bloodgluc_times = c(1, 5, 7.5, 10))
+bloodcount_raw <- filter_bloodcount_data(read_csv("data/GxE_muscle_phos_bloodcounts.csv"),
+                                         filtB_func)
+bloodcount_data <- blood_raw_to_logandfit(bloodcount_raw,
+                       rename = TRUE)
+bodyweight_data <- process_weight_data("data/2022_inbred_weights_JvG.csv",
+                                       id_data = id_data)
+GTTecho_data <- process_GTTecho_data("data/GxE_muscle_phos_GTTecho.csv",
+                                     bodyweight_data = bodyweight_data)
+tissueweight_data <- process_tissueweight_data("data/GxE_muscle_phos_tissue_weight.csv")
+load("data/prot_conc_proc__1.RData")
+prot_conc_proc <- process_prot_conc_data(prot_conc = prot_conc_proc,
+                                         tissueweight_data = tissueweight_data,
+                                         tissues = c("sol"))
+
+#Tissue GU
+tissuecount_args <- list(
+  "sol" = list("tissue" = "sol",
+               "dir" = "data/sol_GU_data.csv")
+)
+tissuecount_raw_list <- map(tissuecount_args, function(x){
+  read_csv(x$dir)
+})
+tissuecount_proc_list <- map2(tissuecount_args, tissuecount_raw_list,
+                              function(args, data){
+                      tissuecounts_normalise(data_p2DG = tissuecounts_raw_to_pD2G(data = data,
+                                                                                  tissue = args$tissue),
+                               bloodcount_data = bloodcount_data,
+                               tissueweight_data = tissueweight_data,
+                               tissue = args$tissue,
+                               prot_conc_data = prot_conc_proc)
+                              })
+#Combine
+tissuecount_common_cols <- map(tissuecount_proc_list, colnames) %>%
+  purrr::reduce(intersect)
+tissuecount_proc_common <- tissuecount_proc_list[[1]][, tissuecount_common_cols]
+tissuecount_proc_unique <- map(tissuecount_proc_list, 
+                               ~.[rownames(tissuecount_proc_common), 
+                                  setdiff(colnames(.), tissuecount_common_cols)])
+tissuecount_proc <- cbind(tissuecount_proc_common, 
+                          purrr::reduce(tissuecount_proc_unique, cbind))
+
+#UIDs
+UIDs <- read_csv("data/selecting_UIDs.csv")
+rownames(UIDs) <- UIDs$Mouse
+
+###Combining
+pheno_data <- combine_phenotype_data(id_data = id_data,
+                       phenotype_data_list = list("bloodgluc_data" = bloodgluc_data,
+                                                  "bloodcount_data" = bloodcount_data,
+                                                  "GTTecho_data" = GTTecho_data,
+                                                  "tissueweight_data" = tissueweight_data,
+                                                  "bodyweight_data" = bodyweight_data,
+                                                  "prot_conc_data" = prot_conc_proc,
+                                                  "tissuecount_data" = tissuecount_proc,
+                                                  "UIDs" = UIDs))
+
+###Set rownames to UID
+rownames(pheno_data) <- pheno_data$UID
+
+save(pheno_data,
+     file = "output/data/pheno_data__5.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
