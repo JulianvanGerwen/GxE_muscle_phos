@@ -1,0 +1,109 @@
+###Background
+Here I process kinase data (e.g. kinase substrate repositories) for use in kinase analyses
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/PSP_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+```
+
+
+
+
+###Phosphositeplus
+Here I process kinase substrate annotations from phosphositeplus
+```{r}
+##Load in and process psp kin sub
+psp_directory <- "data/intermediate/biol_databases/PSP/20220808/"
+psp_kin_sub_data <- load_psp_data(filename = "Kinase_Substrate_Dataset_20220808",
+                          directory = psp_directory)
+#Merge kinases
+psp_kin_sub_data_merge <- psp_kin_sub_data %>%
+  mutate(KINASE = kin_merger(KINASE))
+
+
+#Restrict to site_grp_IDs in my data
+all_SITE_GRP_IDs <- annotation_search(rownames(phos_data_proc_insreg),
+                                      annotation_groups = c("PSP")) %>%
+  .$PSP_SITE_GRP_ID %>% unique
+psp_kin_sub_data_merge <- subset(psp_kin_sub_data_merge, SITE_GRP_ID %in% all_SITE_GRP_IDs)
+
+##Split into all substrates and in vivo only substrates
+psp_kin_sub_data_merge_invivo <- subset(psp_kin_sub_data_merge,
+                                        IN_VIVO_RXN == "X")
+
+##Make kinase list
+psp_kin_sub_list <- map(unique(psp_kin_sub_data_merge$KINASE),
+                              ~unique(psp_kin_sub_data_merge[psp_kin_sub_data_merge$KINASE == ., 
+                                                             "SITE_GRP_ID"]))
+names(psp_kin_sub_list) <- unique(psp_kin_sub_data_merge$KINASE)
+psp_kin_sub_list_invivo <- map(unique(psp_kin_sub_data_merge_invivo$KINASE),
+                              ~unique(psp_kin_sub_data_merge_invivo[psp_kin_sub_data_merge_invivo$KINASE == ., 
+                                                             "SITE_GRP_ID"]))
+names(psp_kin_sub_list_invivo) <- unique(psp_kin_sub_data_merge_invivo$KINASE)
+
+##Remove autophosphorylation sites (substrates on the kinase itself)
+psp_data <- load_psp_data(filename = "Phosphorylation_site_dataset_20220808",
+                          directory = psp_directory)
+psp_kin_autophos_list <- psp_get_kinasepsites(psp_kin_sub_data_merge,
+                                          psp_data)
+psp_kin_autophos_list <- psp_kin_autophos_list[names(psp_kin_sub_list_invivo)]
+psp_kin_sub_list_invivo_noauto <- map2(psp_kin_sub_list_invivo,
+                                       psp_kin_autophos_list, 
+                                       setdiff)
+```
+
+###Gsk3 substrates
+I use a custom list of putative Gsk3 substrates generated in 2023 Nat Comms (10.1038/s41467-023-36549-2)
+```{r}
+##Load in data
+load("data/intermediate/biol_databases/phos_gsk3i_proc__2.RData")
+
+##Convert Gsk3 substrates into SITE_GRP_IDs
+gsk3_subs_uniprotsite <- subset(phos_gsk3i_proc, GSK3i_down_motif == TRUE &
+                                  #Exclude autophos sites
+                                  gene %in% c("Gsk3a", "Gsk3b") == FALSE) %>%
+                             .$uniprot_site %>% unique
+gsk3_subs_SITEGRPID <- uniprotsite_to_sitegroupid(uniprot_sites = gsk3_subs_uniprotsite,
+                           psp_phos_data = psp_data) %>% unlist
+gsk3_subs_SITEGRPID <- gsk3_subs_SITEGRPID[!is.na(gsk3_subs_SITEGRPID)]
+
+##Make substrate lists
+Gsk3i_sub_list <- list("GSK3" = gsk3_subs_SITEGRPID)
+Gsk3i_psp_sub_list <- list("GSK3" = unique(c(gsk3_subs_SITEGRPID,
+                                             psp_kin_sub_list_invivo_noauto$GSK3)))
+#Implant Gsk3 in psp sub list
+psp_kin_sub_list_invivo_noauto_Gsk3i <- psp_kin_sub_list_invivo_noauto
+psp_kin_sub_list_invivo_noauto_Gsk3i$GSK3 <- unique(c(psp_kin_sub_list_invivo_noauto_Gsk3i$GSK3,
+                                                gsk3_subs_SITEGRPID))
+
+##Export
+save(psp_kin_sub_list_invivo_noauto_Gsk3i, 
+     file = "output/data/psp_kin_sub_list_invivo_noauto_Gsk3i__1.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

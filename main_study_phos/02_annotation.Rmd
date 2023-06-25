@@ -1,0 +1,142 @@
+###Background
+Here I map annotation databases into my data
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+home_directory <- "..\\"
+source("..\\scripts/01_objects__1.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+```
+
+Set up 
+```{r}
+load("data/intermediate/phos_data/phos_data_raw_norm_filt1_sum__1.RData")
+phos_data_annotation <- dplyr::select(phos_data_raw_norm_filt1_sum, 
+                               c(genes, gene, uniprots, uniprot, 
+                                 site, multiplicity,
+                                 standard_name,
+                                 gene_uniprot, gene_site, uniprot_site, gene_uniprot_site,
+                                 num_quant_samples))
+
+#load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+```
+
+
+
+###PhosphositePlus
+Get SiteGrpIDs
+```{r}
+#Load in PSP data
+psp_directory <- "data/intermediate/biol_databases/PSP/20220808"
+source(paste(home_directory, "scripts/PSP_JvG.R", sep = ""))
+psp_data <- load_psp_data(filename = "Phosphorylation_site_dataset_20220808",
+                          directory = psp_directory)
+
+#Initial mapping of SITEGRPID
+SiteGrpIDs_list <- uniprotsite_to_sitegroupid(phos_data_annotation$uniprot_site,
+                                       psp_phos_data = psp_data,
+                                       restrict_to_phos = TRUE)
+phos_data_annotation$PSP_SITE_GRP_ID <- unlist(SiteGrpIDs_list)
+phos_data_annotation$PSP_annotated <- !is.na(phos_data_annotation$PSP_SITE_GRP_ID)
+
+##Annotations for regulatory sites, disease sites, kinases
+##Load in data
+psp_kin_sub_data <- load_psp_data(filename = "Kinase_Substrate_Dataset_20220808",
+                          directory = psp_directory)
+psp_reg_site_data <- load_psp_data(filename = "Regulatory_sites_20220808",
+                          directory = psp_directory)
+psp_disease_site_data <- load_psp_data(filename = "Disease-associated_sites_20220808",
+                          directory = psp_directory)
+#Map
+psp_annotation <- psp_kinregdisease_search(phos_data_annotation$PSP_SITE_GRP_ID)
+phos_data_annotation <- cbind(phos_data_annotation, psp_annotation)
+```
+
+
+```{r}
+#Flattern all lists with ;
+for (i in 1:ncol(phos_data_annotation)){
+  if(typeof(phos_data_annotation[, i]) == "list"){
+    #Flatten
+    phos_data_annotation[, i] <- map(phos_data_annotation[, i], ~paste(., collapse = ";")) %>%
+      unlist
+    #Set to NA if empty
+    phos_data_annotation[phos_data_annotation[, i] == "", i] <- NA
+  }
+}
+
+#Output
+save(phos_data_annotation,
+     file = "output/data/phos_data_annotation__1.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

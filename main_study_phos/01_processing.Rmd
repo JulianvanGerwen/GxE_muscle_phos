@@ -1,0 +1,350 @@
+###Background
+Here I process data
+
+###Dataframe log
+In this file I generate several versions of the phospho data through successive processing. They, in order:
+
+phos_data_rawest: Raw data read directly from the file
+phos_data_raw: Raw data with columns renamed, and genes and uniprots assigned
+phos_data_raw_norm: Raw data normalised by median normalised
+phos_data_raw_norm_filt1: Normalised raw data with non Class I sites filtered and extremely low intensity outliers filtered
+phos_data_raw_norm_filt1_sum: phos_data_raw_norm_filt1 with summary statistics added
+
+
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/boxplots_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/04_processing.R")
+```
+
+###Load in data and rename columns
+Rename info  cols
+```{r}
+#Load in
+phos_data_rawest <- read.delim("data/raw/GxE_muscle_phos_phosdata_20220824_SH.txt")
+phos_data_raw <- phos_data_rawest[-1, ]
+#Make phos cols numerical
+phos_cols <- grep("^X", colnames(phos_data_raw))
+for (index in phos_cols){
+  phos_data_raw[, index] <- as.numeric(phos_data_raw[, index])
+}
+
+#Rename info cols
+phos_data_raw <- phos_data_raw %>%
+  dplyr::select(-c(PTM.ModificationTitle,
+            PTM.CollapseKey,
+            PG.ProteinGroups)) %>%
+  dplyr::rename(genes = PG.Genes,
+         uniprots = PG.UniProtIds,
+         protein = PTM.ProteinId,
+         localisation_probability = Localization.probability,
+         multiplicity = PTM.Multiplicity,
+         AA = PTM.SiteAA,
+         site_location = PTM.SiteLocation) %>%
+  #Fix columns and make more names
+  mutate(localisation_probability = as.numeric(localisation_probability),
+         site = paste(AA, site_location, sep = ""))
+```
+
+Rename phospho cols using mouse UIDs (e.g. NOD_CHOW_ins_2)
+```{r}
+phos_colnames <- colnames(phos_data_raw)[grep("^X", colnames(phos_data_raw))]
+#Load in pheno data to get UIDs
+load("data/raw/sample_key__1.RData")
+phos_colnames_mouse <- strsplit(phos_colnames, "_") %>%
+  map(function(x){
+    mouse <- rev(x)[1]
+    mouse <- gsub("\\..+", "", mouse)
+    return(mouse)
+  }) %>% unlist
+phos_colnames_UIDs <- map(phos_colnames_mouse,
+                          function(x){
+                            sample_key$UID[which(sample_key$Mouse == x)]
+                          }) %>%
+  unlist
+names(phos_colnames_UIDs) <- phos_colnames
+#Rename with UIDs
+for (i in 1:length(phos_colnames_UIDs)){
+  colnames(phos_data_raw)[which(colnames(phos_data_raw) ==
+                                  names(phos_colnames_UIDs)[i])] <- phos_colnames_UIDs[i]
+}
+
+#Reorder so phoscols are in order and at the back
+#Get ordered UIDs
+UID_df <- strsplit(phos_colnames_UIDs, "_") %>%
+  purrr::reduce(rbind) %>%
+  as.data.frame()
+colnames(UID_df) <- c("Strain", "Diet", "Ins", "num")
+UID_df$UID <- phos_colnames_UIDs
+UID_df <- mutate(UID_df,
+                 Strain = factor(Strain, levels = Strain_levels),
+                 Diet = factor(Diet, levels = Diet_levels),
+                 Ins = factor(Ins, levels = Ins_levels),
+                 num = as.numeric(num))
+UID_df <- UID_df %>%
+  .[order(.$Strain, .$Diet, .$Ins, .$num), ]
+UIDs_ordered <- UID_df$UID
+#Reorder
+nonphos_colnames <- colnames(phos_data_raw)[which(colnames(phos_data_raw) %in%
+                                                    phos_colnames_UIDs == FALSE)]
+phos_data_raw <- phos_data_raw[, c(nonphos_colnames,
+                                   UIDs_ordered)]
+```
+
+###Protein and gene naming
+Assign uniprots and genes, and make names. Add sequence window
+```{r}
+#Assign uniprot by taking the assigned protein
+phos_data_raw$uniprot <- phos_data_raw$protein
+
+##Assign genes
+#Take the gene that corresponds to the chosen uniprot
+mult_genes_uniprots_df$uniprot_index <- map2(mult_genes_uniprots_df$uniprots,
+                                             phos_data_raw$uniprot,
+                                             function(choices, uniprot){which(choices == uniprot)}) %>%
+  unlist
+phos_data_raw$gene <- map2(mult_genes_uniprots_df$genes,
+                           mult_genes_uniprots_df$uniprot_index,
+                           function(choices, index){choices[index]}) %>%
+  unlist
+#For empty genes, turn them into the uniprot
+no_gene_indices <- which(phos_data_raw$gene == "" |
+                           is.na(phos_data_raw$gene))
+phos_data_raw$gene[no_gene_indices] <- phos_data_raw$uniprot[no_gene_indices]
+
+##Make standard name, uniprot_site, etc
+#standard_name
+phos_data_raw <- mutate(phos_data_raw,
+                        standard_name = paste(gene, uniprot, site, multiplicity, sep = "_"))
+rownames(phos_data_raw) <- phos_data_raw$standard_name
+#All combinations of gene, uniprot, site, multiplicity
+combs <- list(c(1, 2),
+              c(1, 3),
+              c(2, 3),
+              c(3, 4),
+              c(1, 2, 3))
+names <- c("gene", "uniprot", "site", "multiplicity")
+comb_colnames <- map(combs, ~paste(names[.], collapse = "_")) %>% unlist
+phos_data_raw[, comb_colnames] <- map(combs,
+                                      function(comb){
+                                        map(strsplit(phos_data_raw$standard_name, "_"),
+                                            ~paste(.[comb], collapse = "_")) %>% unlist
+                                      }) %>%
+  purrr::reduce(cbind)
+#Add sequence window
+uniprot_fastas <- read_fasta_to_list("data/intermediate/biol_databases/UP000000589_10090.fasta")
+phos_data_raw$sequence_window <- map(phos_data_raw$uniprot_site,
+                                     ~get_sequence_window(uniprot_fastas = uniprot_fastas,
+                                                          uniprot_site = .)) %>% unlist
+```
+
+
+###Normalisation
+```{r}
+#normalise
+phos_data_raw_norm <- median_normaliser("output/images/processing/normalisation/",
+                                  phos_data_raw,
+                                  num_cols = UIDs_ordered)
+```
+
+
+
+####Filtering
+###Filtering by site score
+```{r}
+###Class 1 sites
+#Reduce to just Class I (> 0.75)
+phos_data_raw_norm_filt1 <- phos_data_raw_norm[which(phos_data_raw_norm$localisation_probability > 0.75), ]
+
+###pheno_data
+load("data/intermediate/pheno_data/pheno_data__5.RData")
+num_cols <- colnames(phos_data_raw_norm_filt1) %>% .[grep("_\\d+$", .)]
+non_num_cols <- setdiff(colnames(phos_data_raw_norm_filt1), num_cols)
+num_cols <- num_cols %>% .[which(. %in% pheno_data$UID)]
+phos_data_raw_norm_filt1 <- 
+  phos_data_raw_norm_filt1[, which(colnames(phos_data_raw_norm_filt1) %in%
+                                     c(num_cols, non_num_cols))]
+#Update UIDs_ordered
+UIDs_ordered_filtered <- intersect(UIDs_ordered, colnames(phos_data_raw_norm_filt1))
+#Remove ppeptides that are now absent
+filt1_quant_vec <- rowSums(!is.na(phos_data_raw_norm_filt1[, UIDs_ordered_filtered]))
+phos_data_raw_norm_filt1 <- phos_data_raw_norm_filt1[which(filt1_quant_vec > 0), ]
+```
+
+###Filtering out low intensity values
+There are some extremely low intensity values (log2 < 5) that generally seem like outliers, in that they appear in sites that are otherwise quantified in many samples with much higher intensity. Here I filter those out
+```{r}
+###Filter sites with log2 int < 5 and > 6 from ppeptide median
+#This was determined through analysis in 11_low_intensity_values.Rmd
+source("scripts/07_filtering.R")
+lowint_filter_df <-  filter_low_and_belowbulk(phos_data_raw_norm_filt1,
+                                     num_cols = UIDs_ordered_filtered,
+                                     threshold_low = 5,
+                                     threshold_diff = 6)
+lowint_filter_m <- as.matrix(lowint_filter_df[, -ncol(lowint_filter_df)])
+phos_data_raw_norm_filt1[, UIDs_ordered_filtered][lowint_filter_m] <- NA
+```
+
+
+###Summary stats
+```{r}
+#Medians and median FCs. Means
+phos_data_raw_norm_filt1_sum <- GxEphos_mean_FC_maker(phos_data_raw_norm_filt1,
+                                   summary_fun = "median",
+                                   num_cols = UIDs_ordered_filtered)
+means <- condition_averager(phos_data_raw_norm_filt1,
+                   summary_fun = "mean",
+                   num_cols = UIDs_ordered_filtered)
+phos_data_raw_norm_filt1_sum <- cbind(phos_data_raw_norm_filt1_sum, means)
+#Ins response
+ins_response <- GxEphos_insresponse_maker(phos_data_raw_norm_filt1,
+                          num_cols = UIDs_ordered_filtered,
+                          summary_func = function(x){median(x, na.rm = TRUE)})
+phos_data_raw_norm_filt1_sum <- cbind(phos_data_raw_norm_filt1_sum, ins_response)
+#CV
+phos_data_raw_norm_filt1_sum <- GxEphos_CVs(phos_data_raw_norm_filt1_sum,
+                                            num_cols = UIDs_ordered_filtered)
+
+#Number of quantified replicates
+phos_data_raw_norm_filt1_sum <- GxEphos_quant_calculator(phos_data_raw_norm_filt1_sum,
+                                            num_cols = UIDs_ordered_filtered)
+```
+
+
+
+###QC
+Quantification, PCA, correlation, hierarchical clustering
+```{r}
+#Set up
+source("scripts/01_QC.R")
+QC_data <- phos_data_raw_norm_filt1_sum
+num_cols <- UIDs_ordered_filtered
+
+
+###Quantification
+##Per sample
+quant_df <- quant_df_maker(data = QC_data,
+                           num_cols = num_cols)
+quant_obs <- c("Phosphopeptides" = "ppeptides",
+               "Phosphosites" = "psites",
+               "Phosphoproteins" = "pproteins")
+map2(quant_obs, names(quant_obs),
+     function(ob, name){
+       quant_barplot(quant_df,
+              ycol = name,
+              file = paste("output/images/QC/quant/bplot_quant_",
+                           ob,
+                           "_persample",
+                           sep = ""))
+     })
+#Numbers
+quant_df["total", ]
+apply(quant_df[-nrow(quant_df), 1:3], 2, FUN = "mean")
+
+##Ppeptide hist
+quant_histogram <- quant_hist(data = QC_data,
+                             num_cols = num_cols)
+quant_histogram
+ggsave_pdfpng("output/images/QC/quant/hgram_quant_perppeptide",
+              width = 2, height = 1.5)
+##Upset plot for ppeptides quantified in each strain
+quant_condition_df <- quant_condition_df_maker(QC_data,
+                                               num_cols,
+                                               c("Strain", "StrainDiet", "StrainDietIns"))
+Strain_quant_upset <- upset_plot(quant_condition_df,
+                                 upset_list_col = "quant_Strain_list",
+                                 ylab = "Phosphopeptides")
+save_pdfpng(Strain_quant_upset, "output/images/QC/quant/upsetplot_Strainquant",
+              width = 4, height = 2)
+
+##Number of ppeptides quantified in only one strain
+quant_df_onestrain <- data.frame("Strain" = factor(all_levels$Strain,
+                                                   levels = all_levels$Strain)) %>%
+  mutate(num_ppeptides = map(Strain, function(strain){
+    length(which(quant_condition_df$quant_Strain == strain))
+  }) %>% unlist)
+#plot
+ggplot(quant_df_onestrain, aes(x = Strain, y = num_ppeptides)) +
+  geom_col(fill = "black", width = 0.8) +
+  comfy_theme(include_xaxis = FALSE,
+              rotate_x_text = TRUE) +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "Phosphopeptides")
+ggsave_pdfpng("output/images/QC/quant/barplot_Strainspecific_quant",
+              width = 1.25, height = 1.5)
+
+###PCA
+PC_combos <- list(c(1, 2),
+                  c(2, 3),
+                  c(3, 4))
+map(PC_combos,
+    function(PCs){
+      pca_plot_output <- pca_plot(data = QC_data,
+                            num_cols = num_cols,
+                            PCs = PCs)
+      pca_plot_output
+      ggsave_pdfpng(paste("output/images/QC/cluster/pplot_PCA",
+                          PCs[1],
+                          PCs[2],
+                          sep = "_"),
+                    width = 2.5, height = 1.5)
+    })
+
+###Correlation heatmap
+corr_m_list <- corr_m_maker(QC_data, num_cols)
+pdf("output/images/QC/cluster/hmap_sample_corrs.pdf",
+    width = 4, height = 4)
+corr_m_plotter(corr_m_list$corr_m,
+               black_fraction = 17,
+               total_fraction = 20,
+               text_size = 0.2*7/6)
+dev.off()
+
+###Clustered dendogram
+#Set up colours
+colour_ns <- map(Strain_levels, ~length(grep(., num_cols))) %>% unlist
+dend_colours <- map2(fivestraincols_main, colour_ns,
+                      function(col, n) rep(col, n)) %>% unlist
+#Dendogram
+h_dend <- clustered_dendogram(QC_data,
+                              num_cols = num_cols,
+                              colours = dend_colours)
+pdf("output/images/QC/cluster/dendogram_clustering.pdf",
+    width = 4.5, height = 3)
+plot(h_dend,
+     main = "Hierarchical clustering")
+dev.off()
+```
+
+
+###Output
+```{r}
+save(phos_data_raw_norm_filt1_sum,
+     file = "output/data/phos_data_raw_norm_filt1_sum__1.RData")
+phos_data_proc <- phos_data_raw_norm_filt1_sum
+save(phos_data_proc,
+     file = "output/data/phos_data_proc__1.RData")
+phos_num_cols <- UIDs_ordered_filtered
+save(phos_num_cols,
+     file = "output/data/phos_num_cols__1.RData")
+```
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,338 @@
+###Background
+Here I perform kinase analysis
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/boxplots_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+source("scripts/11_enrichment.R")
+
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+load("data/intermediate/phos_data/data_wNAs_filt__2.RData")
+#Add PSP_SITE_GRP_IDs
+phos_data_proc_insreg <- annotation_search_mapback(phos_data_proc_insreg,
+                                                   annotation_groups = "PSP")
+data_wNAs_filt <- annotation_search_mapback(data_wNAs_filt,
+                                                   annotation_groups = "PSP")
+
+#Load in kinase substrate data
+load("data/intermediate/biol_databases/psp_kin_sub_list_invivo_noauto_Gsk3i__1.RData")
+
+#Canonical kinases
+can_kins <- c("Akt",
+              "mTOR",
+              "p70S6K",
+              "p90RSK",
+              "GSK3")
+
+#KSEA colours
+KSEA_colours <- map(fivestraincols_main, ~rep(., 2)) %>% unlist
+```
+
+
+
+
+
+####Run stats 
+I perform KSEA in each insulin-stimulated mouse using the insulin response
+
+```{r}
+##Set up args
+trial_n <- 1000
+#Get columns ready
+basnorm_cols <- colnames(phos_data_proc_insreg) %>%
+  .[grep("basnorm_\\d+$", .)]
+#KSEA args
+KSEA_insbas_args <- list(
+  "ins_resp" = list(
+    
+    "num_cols" = basnorm_cols,
+    "conditions" = strsplit(basnorm_cols, "_") %>% 
+      map(~paste(.[c(1, 2, 5)], collapse = "_")) %>% unlist,
+    "kin_sub_list" = psp_kin_sub_list_invivo_noauto_Gsk3i
+  )
+)
+##Set up substrate data by performing filtering
+#insresp quantified in each straindiet
+insresp_cols <- colnames(phos_data_proc_insreg) %>% .[grep("_basnorm_\\d+$", .)]
+insresp_StrainDiet_quants <- map(all_levels$StrainDiet,
+                                 function(strain_diet){
+                                   suffix <- paste(strain_diet, "_ins_basnorm_\\d+$", sep = "")
+                                   num_data <- phos_data_proc_insreg %>% .[, grep(suffix, colnames(.))]
+                                   quants <- rowSums(!is.na(num_data), na.rm = TRUE)
+                                 }) %>% 
+  purrr::reduce(cbind)
+insresp_StrainDiet_allquant_bool <- rowSums(insresp_StrainDiet_quants > 0) == 10
+#Filter: quantified in >= 1/2 samples, and at least one insresp value in each StrainDiet combination
+phos_data_proc_insreg_forKSEA <- phos_data_proc_insreg[insresp_StrainDiet_allquant_bool, ]
+phos_data_proc_insreg_forKSEA <- subset(phos_data_proc_insreg_forKSEA,
+                                           num_quant_samples >= 47)
+
+##Run KSEA
+set.seed(57)
+KSEA_insbas <- map(KSEA_insbas_args,
+                          function(x){
+                            phos_data_proc_insreg
+                            #Set up data
+                            data <- phos_data_proc_insreg_forKSEA
+                            num_data <- data[, x$num_cols]
+                            #Run KSEA
+                          KSEA_output <- 
+                          KSEA_from_list_multconds(num_data = num_data,
+                                                  conditions = x$conditions, 
+                                                  stat_names = data$PSP_SITE_GRP_ID,
+                                                  kin_sub_list = x$kin_sub_list,
+                                                  trial_n = trial_n,
+                                                  merge = TRUE,
+                                                  promisc_threshold = 4)
+                          return(KSEA_output)
+                          })
+
+##Calculate signed -log10pvals
+#If p = 0, set -log10 p to 4 (this is equivalent to p = 0.0001, which is impossible to get with n = 1000 trials)
+KSEA_insbas <- map(KSEA_insbas,
+                   function(data){
+                     #Get conditions
+                     conditions <- colnames(data) %>%
+                       .[grep("_ES$", .)] %>%
+                       gsub("_ES$", "", .)
+                     #Loop over conditons
+                     for (condition in conditions){
+                       colname <- paste(condition, "_signlogp", sep = "")
+                       nlogps <- signed_nlog10_pval(FCs = as.numeric(data[, paste(condition, "_ES", 
+                                                                                  sep = "")]),
+                                                    pvals = as.numeric(data[, paste(condition, "_p", 
+                                                                                    sep = "")]),
+                                                    inf_val = 4)
+                       data[, colname] <- nlogps
+                     }
+                     return(data)
+                   })
+
+##Sum number of significantly regulated samples/conditions
+KSEA_insbas <- map(KSEA_insbas,
+                   function(data){
+                     sig_m <- data[, grep("_p$", colnames(data))] < 0.05
+                     data$num_sig_samples <- rowSums(sig_m, na.rm = TRUE)
+                     return(data)
+                   })
+
+##Subset for kinases significantly regulated in >= 5 samples or >= 1 strain-diet condition
+KSEA_insbas_sigkins <- KSEA_insbas
+KSEA_insbas_sigkins$ins_resp <- subset(KSEA_insbas_sigkins$ins_resp,
+                                         num_sig_samples >= 5)
+```
+
+
+
+####Canonical kinases
+Visualise
+```{r}
+KSEA_insbas_bplotter(KSEA_list = KSEA_insbas,
+                     kinases = can_kins,
+                     dir = "output/images/analysis/kinases/insbas_KSEA/bplot_KSEA_cankins_",
+                     width = 4, height = 2.5)
+```
+
+
+####Significantly regulated kinases
+These are kinases significantly regulated in >= 5 samples
+
+###Strain and diet differences in significant kinases
+Here I perform tests to identify kinases that differ in insulin regulation across strains and diets
+
+##Run stats
+Set up
+```{r}
+sig_threshold <- 0.05
+KSEA_insbas_sigkins_long <- KSEA_pivot_longer(KSEA_insbas_sigkins$ins_resp)
+source("scripts/08_ins_reg.R")
+```
+
+CHOW anova for Strain effects
+```{r}
+##Run ANOVAs
+KSEA_CHOW_aov_ps <- map(levels(KSEA_insbas_sigkins_long$kinase),
+                              function(kin){
+                               temp_test <- aov(val ~ Strain, 
+                                                 subset(KSEA_insbas_sigkins_long, 
+                                                        kinase == kin &
+                                                          Diet == "CHOW")) 
+                               pval <- summary(temp_test)[[1]][1, 5]
+                               return(pval)
+                              }) %>% unlist
+names(KSEA_CHOW_aov_ps) <- levels(KSEA_insbas_sigkins_long$kinase)
+#Adjust pvalues
+KSEA_CHOW_aov_adjps <- p.adjust(KSEA_CHOW_aov_ps, method = "fdr")
+KSEA_CHOW_aov_sigkins <- names(KSEA_CHOW_aov_adjps)[which(KSEA_CHOW_aov_adjps < sig_threshold)]
+#Combine
+KSEA_CHOW_aov_results <- data.frame("CHOWStrain_aov_p" = KSEA_CHOW_aov_ps,
+                                    "CHOWStrain_aov_p_adj" = KSEA_CHOW_aov_adjps)
+```
+
+Two-way anova for StrainxDiet and Diet effects
+Perform anovas
+```{r}
+##Run ANOVAs
+KSEA_twowayaov_ps <- map(levels(KSEA_insbas_sigkins_long$kinase),
+                              function(kin){
+                               temp_test <- aov(val ~ Strain*Diet, 
+                                                 subset(KSEA_insbas_sigkins_long, 
+                                                        kinase == kin)) 
+                               pvals <- summary(temp_test)[[1]][2:3, 5]
+                               names(pvals) <- c("Diet", "StrainxDiet")
+                               return(pvals)
+                              }) %>%
+  purrr::reduce(rbind) %>% as.data.frame
+rownames(KSEA_twowayaov_ps) <- levels(KSEA_insbas_sigkins_long$kinase)
+
+#Adjust pvalues
+KSEA_twowayaov_adjps <- KSEA_twowayaov_ps
+for (col in colnames(KSEA_twowayaov_adjps)){
+  KSEA_twowayaov_adjps[, col] <- p.adjust(KSEA_twowayaov_adjps[, col],
+                                          method = "fdr")
+}
+KSEA_twowayaov_SxD_sigkins <- subset(KSEA_twowayaov_adjps, StrainxDiet < sig_threshold) %>%
+  rownames
+
+#Add ANOVA pvalues
+KSEA_twowayaov_results <- data.frame("SxD_aov_Diet_p" = KSEA_twowayaov_ps$Diet,
+                                    "SxD_aov_StrainxDiet_p" = KSEA_twowayaov_ps$StrainxDiet,
+                                    "SxD_aov_Diet_p_adj" = KSEA_twowayaov_adjps$Diet,
+                                    "SxD_aov_StrainxDiet_p_adj" = KSEA_twowayaov_adjps$StrainxDiet)
+rownames(KSEA_twowayaov_results) <- rownames(KSEA_twowayaov_ps)
+#Add sig classes
+KSEA_twowayaov_results$SxD_aov_sigclass <- NA
+KSEA_twowayaov_results[which(KSEA_twowayaov_results$SxD_aov_Diet_p_adj < sig_threshold), 
+                      "SxD_aov_sigclass"] <- "Diet"
+KSEA_twowayaov_results[which(KSEA_twowayaov_results$SxD_aov_StrainxDiet_p_adj < sig_threshold), 
+                      "SxD_aov_sigclass"] <- "StrainxDiet"
+```
+
+
+##Explore significant kinases
+Export for summary
+```{r}
+#Set up
+KSEA_twowayaov_sig_df <- cbind(KSEA_CHOW_aov_results,
+                               KSEA_twowayaov_results) %>%
+  subset(CHOWStrain_aov_p_adj < sig_threshold |
+           !is.na(SxD_aov_sigclass))
+```
+
+Visualise
+```{r}
+##Subset for significant kinases
+KSEA_insbas_twowayaov_sigkins <- list(
+  "CHOWStrain" = subset(KSEA_CHOW_aov_results, 
+                        CHOWStrain_aov_p_adj < sig_threshold) %>% rownames,
+  "StrainxDiet" = subset(KSEA_twowayaov_results, 
+                         SxD_aov_sigclass == "StrainxDiet") %>% rownames,
+  "Diet" = subset(KSEA_twowayaov_results, 
+                         SxD_aov_sigclass == "Diet") %>% rownames
+)
+KSEA_insbas_twowayaov_sigkins$SxD_or_Diet <- 
+  unique(c(KSEA_insbas_twowayaov_sigkins$StrainxDiet,
+           KSEA_insbas_twowayaov_sigkins$Diet))
+KSEA_insbas_twowayaov_sigkins$all <- unique(unlist(KSEA_insbas_twowayaov_sigkins))
+
+KSEA_insbas_twowayaov_sigkins_list <- map(KSEA_insbas_twowayaov_sigkins, 
+                                          function(rows){map(KSEA_insbas_sigkins, 
+                                                             ~.[rows, ])})
+
+##Heatmaps
+KSEA_insbas_hmapper(KSEA_insbas_twowayaov_sigkins_list$CHOWStrain,
+                    conditions = all_levels$StrainDiet %>% .[grep("CHOW", .)],
+                    dir = paste("output/images/analysis/kinases/insbas_KSEA/hmap_KSEA_",
+                                "StrainCHOW", 
+                                "_sig", sep = ""),
+                    width = 2.75, height = 4)
+KSEA_insbas_hmapper(KSEA_insbas_twowayaov_sigkins_list$SxD_or_Diet,
+                    conditions = all_levels$StrainDiet,
+                    dir = paste("output/images/analysis/kinases/insbas_KSEA/hmap_KSEA_",
+                                "SxD_or_Diet", 
+                                "_sig", sep = ""),
+                    width = 4, height = 4)
+KSEA_insbas_hmapper(KSEA_insbas_twowayaov_sigkins_list$all,
+                    conditions = all_levels$StrainDiet,
+                    dir = paste("output/images/analysis/kinases/insbas_KSEA/hmap_KSEA_",
+                                "all", 
+                                "_sig", sep = ""),
+                    width = 4, height = 4)
+```
+
+
+###Correlation with glucose uptake
+```{r}
+###Set up
+#Load in pheno data
+load("data/intermediate/pheno_data/pheno_data__5.RData")
+pheno_col <- "sol_p2DG_weightnorm_rate"
+#Set up KSEA data
+KSEA_data_tocorr <-KSEA_insbas_sigkins$ins_resp
+KSEA_data_tocorr <- KSEA_data_tocorr %>%
+  .[, grep("_ES$", colnames(.))]
+colnames(KSEA_data_tocorr) <- strsplit(colnames(KSEA_data_tocorr), "_") %>%
+  map(~paste(c(.[1], .[2], "ins", .[3]), collapse = "_")) %>% unlist
+#Combine with GU data
+KSEA_GU_data <- combine_phos_pheno_data(phos_data = KSEA_data_tocorr,
+                        pheno_data = pheno_data,
+                        pheno_cols = pheno_col,
+                        phos_num_cols = colnames(KSEA_data_tocorr),
+                        phos_UIDs = colnames(KSEA_data_tocorr),
+                        phos_rows = rownames(KSEA_data_tocorr))
+#Summarise over strains and diets
+num_cols <- c(rownames(KSEA_data_tocorr), pheno_col)
+KSEA_GU_data_sum <- map(levels(KSEA_GU_data$StrainDiet),
+                        function(strain_diet){
+                          data <- subset(KSEA_GU_data, StrainDiet == strain_diet) %>% .[, num_cols]
+                          data_sum <- apply(data, 2, FUN = "median", na.rm = TRUE)
+                          return(data_sum)
+                        }) %>%
+  purrr::reduce(rbind) %>% as.data.frame
+rownames(KSEA_GU_data_sum) <- levels(KSEA_GU_data$StrainDiet)
+KSEA_GU_data_sum$StrainDiet <- rownames(KSEA_GU_data_sum)
+KSEA_GU_data_sum[, c("Strain", "Diet")] <- strsplit(KSEA_GU_data_sum$StrainDiet, "_") %>%
+  purrr::reduce(rbind)
+KSEA_GU_data_sum <- mutate(KSEA_GU_data_sum,
+                           StrainDiet = factor(StrainDiet, levels = all_levels$StrainDiet),
+                           Strain = factor(Strain, levels = all_levels$Strain),
+                           Diet = factor(Diet, levels = all_levels$Diet))
+
+###Run correlation tests
+source("scripts/10_GU_correlations.R")
+#Corr tests
+KSEA_corr_data <- list("all_data" = KSEA_GU_data, 
+                          "sum_data" = KSEA_GU_data_sum)
+KSEA_GU_corrs <- map(KSEA_corr_data,
+                     ~phos_GU_correlator_mult_fromcomb(phos_GU_data = .,
+                                 ppeptides = rownames(KSEA_insbas_sigkins$ins_resp),
+                                 cor_method = "pearson"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,102 @@
+###Background
+Here I characterise Strain differences in insulin regulation as identified in 03_insulin_regulation.Rmd
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(qvalue)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/03_basic_functions.R")
+source("scripts/09_insregdiff.R")
+
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+```
+
+###Set up data 
+```{r}
+##Make insreg data
+insreg_data <- subset(phos_data_proc_insreg, insreg_bool == TRUE)
+```
+
+###Canonical insulin signalling
+Here I look at canonical insulin signalling proteins and phosphosites
+
+Set up
+```{r}
+##Directory
+canins_dir <- "output/images/analysis/insulin_regulation/insreg_changes/CHOW_Strain_aov/caninssig/"
+```
+
+##Canonical insulin signalling proteins
+This is a list of "canonical insulin signalling proteins" compiled from several ontologies, which features in 2022 Nat Biotech paper (doi.org/10.1038/s41587-021-01099-9 )
+```{r}
+###Set up
+##Load in and process
+can_ins_sig_proteins_EN <- readRDS("data/intermediate/biol_databases/can_ins_sig/can_ins_prots.rds") %>%
+  tolower %>% 
+  strsplit("") %>% map(~paste(c(toupper(.[1]), .[-1]), collapse = "")) %>% unlist
+
+##Combine with insreg_data
+insreg_data_caninsEN <- insreg_data
+insreg_data_caninsEN$caninssig_EN <- FALSE
+insreg_data_caninsEN[which(insreg_data_caninsEN$gene %in% can_ins_sig_proteins_EN), "caninssig_EN"] <- TRUE
+
+
+##Strain changes
+Straindiff_caninsEN_summary <- summary_StrainCHOW_change(insreg_data_caninsEN,
+                                                    Var2 = "caninssig_EN")
+#y axis is proportion with strain effect
+ggplot(subset(Straindiff_caninsEN_summary$bool, 
+              insregdiff_StrainCHOW_change_bool == TRUE), 
+       aes(x = caninssig_EN, y = prop_of_caninssig_EN*100)) +
+  geom_col(fill = "black", width = 0.8) +
+  comfy_theme() +
+  labs(y = "% Strain effect",
+       x = "Canonical insulin signalling protein")
+ggsave_pdfpng(paste(canins_dir, "bplot_Straindiffbool_caninsEN_prop_ystrain",
+                    sep = ""),
+              width = 1.25, height = 1.5)
+
+#Fisher's exact
+fishers_DE_pathway(background_genes = rownames(insreg_data_caninsEN),
+                   DE_genes = subset(insreg_data_caninsEN, 
+                                     caninssig_EN == TRUE) %>% rownames,
+                   pathway_genes = subset(insreg_data_caninsEN, 
+                                          insregdiff_StrainCHOW_change_bool == TRUE) %>% rownames,
+                   alternative = "two.sided")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

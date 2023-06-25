@@ -1,0 +1,836 @@
+###Background
+Here I search for and characterise insulin-regulated sites. I also assess how they are affected by strain and/or diet
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(qvalue)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/boxplots_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/stats_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+source("scripts/08_ins_reg.R")
+```
+
+###Load and prep data
+```{r}
+load("data/intermediate/phos_data/phos_data_proc__1.RData")
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_num_cols__1.RData")
+#Number of quantified samples per ppeptide in each condition
+phos_quant_df <- condition_quanter(phos_data_proc)
+
+phos_data_proc_insreg <- phos_data_proc
+
+phos_num_cols_basnorm <- colnames(phos_data_proc_insreg)[grep("basnorm_\\d+", 
+                                                              colnames(phos_data_proc_insreg))]
+```
+
+
+####Stats for insulin regulation and differences in insulin regulation
+
+###Insreg stats
+```{r}
+##Set up
+filter_args <- map(all_levels$StrainDiet,
+                         ~list("bas_quant" = phos_quant_df[, paste(., "_bas", sep = "")],
+                               "ins_quant" = phos_quant_df[, paste(., "_ins", sep = "")]))
+names(filter_args) <- all_levels$StrainDiet 
+filter_func <- function(args){basins_quant_StrainDietfilter(args = args,
+                                                            bas_threshold = 3,
+                                                            ins_threshold = 3)}
+StrainDiet_threshold <- 8
+data <- phos_data_proc_insreg
+
+##StrainDiet filter
+data_filtered <- apply_StrainDietfilter(filter_func = filter_func,
+                                                arguments = filter_args,
+                                                ppeptides = rownames(data),
+                                        StrainDiet_threshold = StrainDiet_threshold)
+#Make NAs in data for StrainDiets that do not pass the filter
+num_cols_forNA <- c(phos_num_cols_basnorm,
+                    all_FC_cols$Ins,
+                    phos_num_cols)
+NA_data <- StrainDiet_filter_makeNAs(filter_df = data_filtered[, all_levels$StrainDiet],
+                                     num_df = data[, num_cols_forNA])
+data_wNAs <- data
+data_wNAs[, num_cols_forNA] <- NA_data
+#Restrict to just sites that pass combined filter
+data_wNAs_filt <- data_wNAs[data_filtered$combined, ]
+##Insreg stats
+test_results <- ppeptide_stat_runner(data_wNAs_filt, 
+                          test_func = ins_3wayaov, num_cols = phos_num_cols)
+
+#Map back into data_wNAs_filt
+data_wNAs_filt[, c("ins3wayaovint_p", "ins3wayaovint_F")] <- test_results[, c("p", "F")]
+#Insreg filtering
+data_insreg_list <- insreg_FC_filterer_directedMax(data_wNAs_filt,
+                               FC_cutoff = 0.58,
+                               FC_columns = all_FC_cols$Ins,
+                               q_cutoff = 0.05,
+                               q_col = NULL,
+                               p_col = "ins3wayaovint_p",
+                               suffix = NULL)
+#Map into data_wNAs_filt and phos_data_proc_insreg
+data_wNAs_filt <- data_insreg_list$data
+phos_data_proc_insreg <- map_data_into_larger(data_source = data_wNAs_filt,
+                                              data_target = phos_data_proc_insreg,
+                                              cols_to_map = c("ins3wayaovint_p", "ins3wayaovint_F",
+                                                              "ins3wayaovint_q",
+                                                              "ins_bas_logFC_StrainDietmax",
+                                                              "insreg_bool", "insreg_dir"),
+                                              factors_to_preserve = list(c("insreg_dir", "unregulated")))
+phos_data_proc_insreg$insreg_tested <- rownames(phos_data_proc_insreg) %in%
+  rownames(data_wNAs_filt)
+```
+
+###Strain differences in CHOW mice
+Here I run a one-way ANOVA (ins resp ~ Strain) in CHOW mice and perform post-hoc tests to identify where insulin regulation differs in strains compared to C57Bl6J
+```{r}
+#Subset data_wNAs_filt for insulin-regulated sites
+insreg_data <- subset(data_wNAs_filt, insreg_bool == TRUE)
+##Run ANOVAs
+data_CHOWaov <- ppeptide_stat_runner(insreg_data,
+                                 num_cols = phos_num_cols_basnorm[grep("CHOW", phos_num_cols_basnorm)],
+                                 test_func = strain_CHOW_aov,
+                                 results_format = c("p", "F"))
+
+#Adjust pvals
+hist(data_CHOWaov$p)
+data_CHOWaov$q <- qvalue(data_CHOWaov$p)$qvalues
+data_CHOWaov$sig <- data_CHOWaov$q < 0.05
+colnames(data_CHOWaov) <- paste("Strainaov_", colnames(data_CHOWaov), sep = "")
+
+##Posthoc tests
+#Set up
+comparisons <- paste(all_levels$Strain[all_levels$Strain != "C57Bl6J"], "_vs_C57Bl6J", sep = "")
+results_cols <- cross(list(c("p", "t"), comparisons)) %>%
+  map(~paste(rev(unlist(.)), collapse = "_")) %>% unlist
+test_func <- Strain_C57Bl6J_ttests
+ppeptides <- rownames(subset(data_CHOWaov, Strainaov_sig == TRUE))
+#Run ttests
+data_CHOWaov_phoc <- ppeptide_stat_runner(insreg_data[ppeptides, ],
+                             num_cols = phos_num_cols_basnorm[grep("CHOW", phos_num_cols_basnorm)],
+                             test_func = test_func,
+                             results_format = results_cols)
+#Adjust pvalues
+data_CHOWaov_phoc <- qval_adjustment_mult_groupcols(data_CHOWaov_phoc, 
+                                              pcols = colnames(data_CHOWaov_phoc)[grep("_p$",
+                                                                                 colnames(data_CHOWaov_phoc))])
+
+##Run FC filtering
+#Add relevant FC columsn
+FC_cols <- all_FC_cols$Ins[grep("CHOW", all_FC_cols$Ins)]
+data_CHOWaov_phoc[, FC_cols] <- insreg_data[rownames(data_CHOWaov_phoc), FC_cols]
+#Set up FC comparisons
+Strains_noB6 <- all_levels$Strain[all_levels$Strain != "C57Bl6J"]
+names(Strains_noB6) <- Strains_noB6
+totest_list <- map(Strains_noB6, 
+                   ~data_CHOWaov_phoc[, paste(., "_vs_C57Bl6J_sig", sep = "")])
+testFC_list <- map(Strains_noB6, 
+                   ~data_CHOWaov_phoc[, paste(., "_CHOW_bas_vs_", ., "_CHOW_ins_logFC", sep = "")])
+CTRLFC_list <- map(Strains_noB6, ~data_CHOWaov_phoc$C57Bl6J_CHOW_bas_vs_C57Bl6J_CHOW_ins_logFC)
+#Run comparisons
+FC_comparisons <- FC_comparer(totest_list = totest_list,
+                              testFC_list = testFC_list,
+                              CTRLFC_list = CTRLFC_list,
+                              FC_comp_func = FC_filter_adaplin)
+data_CHOWaov_phoc <- cbind(data_CHOWaov_phoc, FC_comparisons)
+#Summarise changed Strains
+data_CHOWaov_phoc$change_conds <- 
+  map(1:nrow(data_CHOWaov_phoc),
+      function(index){
+        changed_bool <- as.logical(data_CHOWaov_phoc[index, paste(Strains_noB6,
+                                                              "_change_bool", sep = "")])
+        changed_Strains <- Strains_noB6[changed_bool]
+        pasted_Strains <- paste(changed_Strains, collapse = ";")
+        if (pasted_Strains == ""){pasted_Strains <- NA}
+        return(pasted_Strains)
+      }) %>% unlist
+data_CHOWaov_phoc$change_bool <- !is.na(data_CHOWaov_phoc$change_conds)
+data_CHOWaov_phoc$change_num <- map(strsplit(data_CHOWaov_phoc$change_conds, ";"), 
+                                    function(vec){
+                                      if (is.na(vec[1])){
+                                        return(0)
+                                      } else {
+                                        return(length(vec))
+                                      }
+                                    }) %>% unlist
+data_CHOWaov_phoc <- mutate(data_CHOWaov_phoc, 
+                            change_num = factor(change_num, levels = sort(unique(change_num))))
+
+##Call differences as enhanced or suppressed
+#enhsupp in individual conditions
+data_CHOWaov_phoc$insreg_dir <- phos_data_proc_insreg[rownames(data_CHOWaov_phoc), "insreg_dir"]
+data_CHOWaov_phoc <- enhsupp_insreg_caller(data_CHOWaov_phoc,
+                                           colnames(data_CHOWaov_phoc)[grep("change_dir$", 
+                                                                            colnames(data_CHOWaov_phoc))])
+#enhsupp overall
+data_CHOWaov_phoc$change_enhsupp <- enhsupp_combiner(data_CHOWaov_phoc,
+                                                    columns = colnames(data_CHOWaov_phoc)[grep("enhsupp$",
+                                                                                               colnames(data_CHOWaov_phoc))])
+
+##Rename and map back in to data_wNAs_filt and phos_data_proc_insreg
+#Remove columns
+data_CHOWaov_phoc_mapping <- data_CHOWaov_phoc
+data_CHOWaov_phoc_mapping <- data_CHOWaov_phoc_mapping[, -c(grep("logFC", colnames(data_CHOWaov_phoc_mapping)),
+                                            grep("insreg_dir", colnames(data_CHOWaov_phoc_mapping)))]
+#Rename
+colnames(data_CHOWaov_phoc_mapping) <- paste("insregdiff_StrainCHOW_", 
+                                             colnames(data_CHOWaov_phoc_mapping), sep = "")
+#Map back in
+data_wNAs_filt <- map_data_into_larger(data_source = data_CHOWaov,
+                                       data_target = data_wNAs_filt,
+                                       cols_to_map = colnames(data_CHOWaov))
+data_wNAs_filt <- map_data_into_larger(data_source = data_CHOWaov_phoc_mapping,
+                                       data_target = data_wNAs_filt,
+                                       cols_to_map = colnames(data_CHOWaov_phoc_mapping),
+                                       factors_to_preserve = list(c("insregdiff_StrainCHOW_change_num",
+                                                               0)))
+phos_data_proc_insreg <- map_data_into_larger(data_source = data_CHOWaov_phoc_mapping,
+                                       data_target = phos_data_proc_insreg,
+                       cols_to_map = c("insregdiff_StrainCHOW_change_bool",
+                                       "insregdiff_StrainCHOW_change_conds",
+                                       "insregdiff_StrainCHOW_change_num",
+                                       colnames(data_CHOWaov_phoc_mapping)[grep("enhsupp$",
+                                                                                colnames(data_CHOWaov_phoc_mapping))]),
+                       factors_to_preserve = list(c("insregdiff_StrainCHOW_change_num",
+                                                               0)))
+```
+
+
+
+###Diet and StrainxDiet effects
+Anova and ttests
+```{r}
+##Anova
+data_Diet_SxDaov <- insregdiff_Diet_strainxdiet_aov(data_insreg_list$data_insreg)
+##ttests for StrainxDiet
+diet_comparisons <- map(all_levels$Strain, ~paste(., "_HFD_vs_", ., "_CHOW", sep = "")) %>% unlist
+results_cols <- cross(list(c("p", "t"), diet_comparisons)) %>%
+  map(~paste(rev(unlist(.)), collapse = "_")) %>% unlist
+test_func <- StrainxDiet_Diet_ttests
+ppeptides <- rownames(subset(data_Diet_SxDaov, posthoc_class == "StrainxDiet"))
+#Run ttests
+data_Diet_SxDaov_SxDttests <- ppeptide_stat_runner(data_wNAs_filt[ppeptides, ],
+                             num_cols = phos_num_cols_basnorm,
+                             test_func = test_func,
+                             results_format = results_cols)
+#Adjust pvalues
+data_Diet_SxDaov_SxDttests <- qval_adjustment_mult_groupcols(data_Diet_SxDaov_SxDttests,
+                                                             pcols = results_cols[grep("_p$",
+                                                                                       results_cols)])
+```
+
+FC filtering
+```{r}
+###StrainxDiet
+data_tested <- data_Diet_SxDaov_SxDttests
+##FC filtering
+#Add relevant FCs
+data_tested[, all_FC_cols$Ins] <- data_wNAs_filt[rownames(data_tested), all_FC_cols$Ins]
+#Set up FC comparisons
+names(diet_comparisons) <- diet_comparisons
+totest_list <- map(diet_comparisons, 
+                   ~data_tested[, paste(., "_sig", sep = "")])
+testFC_list <- strsplit(diet_comparisons, "_vs_") %>% map(function(list){
+  StrainDiet <- list[1]
+  FC_col <- paste(StrainDiet, "_bas_vs_", StrainDiet, "_ins_logFC", sep = "")
+  return(data_tested[, FC_col])
+})
+CTRLFC_list <- strsplit(diet_comparisons, "_vs_") %>% map(function(list){
+  StrainDiet <- list[2]
+  FC_col <- paste(StrainDiet, "_bas_vs_", StrainDiet, "_ins_logFC", sep = "")
+  return(data_tested[, FC_col])
+})
+#Run comparisons
+FC_comparisons <- FC_comparer(totest_list = totest_list,
+                              testFC_list = testFC_list,
+                              CTRLFC_list = CTRLFC_list,
+                              FC_comp_func = FC_filter_adaplin)
+data_tested <- cbind(data_tested, FC_comparisons)
+#Summarise changed conditions
+data_tested$change_conds <- 
+map(1:nrow(data_tested),
+    function(index){
+      changed_bool <- as.logical(data_tested[index, paste(diet_comparisons,
+                                                            "_change_bool", sep = "")])
+      Strains <- strsplit(diet_comparisons, "_") %>% map(~.[1]) %>% unlist
+      changed_Strains <- Strains[changed_bool]
+      pasted_Strains <- paste(changed_Strains, collapse = ";")
+      if (pasted_Strains == ""){pasted_Strains <- NA}
+      return(pasted_Strains)
+    }) %>% unlist
+data_tested$change_bool <- !is.na(data_tested$change_conds)
+data_tested$change_num <- map(strsplit(data_tested$change_conds, ";"), 
+                                    function(vec){
+                                      if (is.na(vec[1])){
+                                        return(0)
+                                      } else {
+                                        return(length(vec))
+                                      }
+                                    }) %>% unlist 
+data_tested <- mutate(data_tested, change_num = factor(change_num,
+                                                       levels = sort(unique(change_num))))
+#Rename
+data_Diet_SxDaov_SxDFCfilt <- data_tested
+colnames(data_Diet_SxDaov_SxDFCfilt) <- paste("StrainxDiet_", colnames(data_Diet_SxDaov_SxDFCfilt), sep = "")
+
+###Diet
+data_tested <- subset(data_Diet_SxDaov, posthoc_class == "Diet")
+##Calculate FCs
+#Mean of ins/bas in each diet
+data_wNAs_filt$CHOW_bas_vs_CHOW_ins <- apply(data_wNAs_filt[, all_FC_cols$Ins[grep("CHOW", all_FC_cols$Ins)]],
+                                        1, FUN = mean, na.rm = TRUE)
+data_wNAs_filt$HFD_bas_vs_HFD_ins <- apply(data_wNAs_filt[, all_FC_cols$Ins[grep("HFD", all_FC_cols$Ins)]],
+                                        1, FUN = mean, na.rm = TRUE)
+FC_cols <- c("CHOW_bas_vs_CHOW_ins", "HFD_bas_vs_HFD_ins")
+data_tested[, FC_cols] <- data_wNAs_filt[rownames(data_tested), FC_cols]
+data_tested <- data_tested[, FC_cols]
+##Set up FC comparisons
+#This is specific to Strain
+totest_list <- list("diet" = rep(TRUE, nrow(data_tested)))
+testFC_list <- list("diet" = data_tested$HFD_bas_vs_HFD_ins)
+CTRLFC_list <- list("diet" = data_tested$CHOW_bas_vs_CHOW_ins)
+
+#Run comparisons
+FC_comparisons <- FC_comparer(totest_list = totest_list,
+                              testFC_list = testFC_list,
+                              CTRLFC_list = CTRLFC_list,
+                              FC_comp_func = FC_filter_adaplin)
+data_tested <- cbind(data_tested, FC_comparisons)
+#Rename
+data_Diet_SxDaov_DFCfilt <- data_tested
+colnames(data_Diet_SxDaov_DFCfilt) <- paste("Diet_", colnames(data_Diet_SxDaov_DFCfilt), sep = "")
+colnames(data_Diet_SxDaov_DFCfilt) <- gsub("Diet_diet_", "Diet_", colnames(data_Diet_SxDaov_DFCfilt))
+```
+
+Combine StrainxDiet and Diet results and map back
+```{r}
+##Combine anova results, SxD filtering results, and D filtering results
+data_Diet_SxDaov_comb <- data_Diet_SxDaov
+colnames(data_Diet_SxDaov_comb) <- paste("SxDaov_", colnames(data_Diet_SxDaov_comb), sep = "")
+data_Diet_SxDaov_comb <- map_data_into_larger(data_source = data_Diet_SxDaov_SxDFCfilt,
+                                              data_target = data_Diet_SxDaov_comb,
+                                              cols_to_map =  colnames(data_Diet_SxDaov_SxDFCfilt))
+data_Diet_SxDaov_comb <- map_data_into_larger(data_source = data_Diet_SxDaov_DFCfilt,
+                                              data_target = data_Diet_SxDaov_comb,
+                                              cols_to_map =  colnames(data_Diet_SxDaov_DFCfilt))
+##Enhsupp
+#Map in insreg
+data_Diet_SxDaov_comb$insreg_dir <- phos_data_proc_insreg[rownames(data_Diet_SxDaov_comb), "insreg_dir"]
+data_Diet_SxDaov_comb <- enhsupp_insreg_caller(data_Diet_SxDaov_comb,
+                                               insregdiff_dir_cols = 
+                                                 colnames(data_Diet_SxDaov_comb)[grep("change_dir",
+                                                                                      colnames(data_Diet_SxDaov_comb))])
+data_Diet_SxDaov_comb$StrainxDiet_change_enhsupp <- 
+  enhsupp_combiner(data_Diet_SxDaov_comb,
+                   columns = colnames(data_Diet_SxDaov_comb)[intersect(grep("^StrainxDiet",
+                                                                            colnames(data_Diet_SxDaov_comb)),
+                                                                       grep("enhsupp$", 
+                                                                            colnames(data_Diet_SxDaov_comb)))])
+##Add overall Diet effect columns
+data_Diet_SxDaov_comb$Dietoverall_change_bool <- data_Diet_SxDaov_comb$StrainxDiet_change_bool |
+  data_Diet_SxDaov_comb$Diet_change_bool
+data_Diet_SxDaov_comb$Dietoverall_change_enhsupp <- 
+  enhsupp_combiner(data_Diet_SxDaov_comb, columns = 
+                     c(colnames(data_Diet_SxDaov_comb)[intersect(grep("^StrainxDiet",
+                                                            colnames(data_Diet_SxDaov_comb)),
+                                                       grep("CHOW_change_enhsupp$", 
+                                                            colnames(data_Diet_SxDaov_comb)))],
+                       "Diet_change_enhsupp"))
+##Rename and add to data_wNAs_filt and phos_data_proc_insreg
+colnames(data_Diet_SxDaov_comb) <- paste("insregdiff_", colnames(data_Diet_SxDaov_comb), sep = "")
+data_wNAs_filt <- map_data_into_larger(data_source = data_Diet_SxDaov_comb,
+                                       data_target = data_wNAs_filt,
+                                       cols_to_map = colnames(data_Diet_SxDaov_comb),
+                                       factors_to_preserve = list(c("insregdiff_StrainxDiet_change_num",
+                                                                    0)))
+phos_data_proc_insreg <- map_data_into_larger(data_source = data_Diet_SxDaov_comb,
+                                       data_target = phos_data_proc_insreg,
+     cols_to_map = c("insregdiff_StrainxDiet_change_bool",
+                     "insregdiff_StrainxDiet_change_conds",
+                     "insregdiff_StrainxDiet_change_num",
+                     colnames(data_Diet_SxDaov_comb)[intersect(grep("^insregdiff_StrainxDiet",
+                                                                    colnames(data_Diet_SxDaov_comb)),
+                                                               grep("enhsupp$", 
+                                                                    colnames(data_Diet_SxDaov_comb)))],
+                     "insregdiff_Diet_change_bool",
+                     "insregdiff_Diet_change_dir",
+                     "insregdiff_Diet_change_enhsupp",
+                     "insregdiff_Dietoverall_change_bool",
+                     "insregdiff_Dietoverall_change_enhsupp"),
+                                       factors_to_preserve = list(c("insregdiff_StrainxDiet_change_num",
+                                                                    0)))
+```
+
+###Combining Strain and Diet analysis
+```{r}
+##For each ppetpide: Is there S, D, and/or SxD effect?
+factors <- c("Strain" = "insregdiff_StrainCHOW_change_bool",
+                "Diet" = "insregdiff_Diet_change_bool",
+                "StrainxDiet" = "insregdiff_StrainxDiet_change_bool")
+phos_data_proc_insreg$insregdiff_change_factors <- map(1:nrow(phos_data_proc_insreg), function(index){
+  bool_vec <- as.logical(phos_data_proc_insreg[index, factors])
+  changed_factors <- names(factors)[bool_vec]
+  pasted_factors <- paste(changed_factors, collapse = ";")
+  if (pasted_factors == ""){
+    pasted_factors <- NA
+  }
+  return(pasted_factors)
+}) %>% unlist
+phos_data_proc_insreg <- mutate(phos_data_proc_insreg,
+                                insregdiff_change_factors = factor(insregdiff_change_factors,
+                                                                   levels = c("Strain",
+                                                                              "Diet",
+                                                                              "StrainxDiet",
+                                                                              "Strain;Diet",
+                                                                              "Strain;StrainxDiet")))
+phos_data_proc_insreg$insregdiff_change_bool <- !is.na(phos_data_proc_insreg$insregdiff_change_factors)
+```
+
+
+###Summarise insulin regulation and insreg differences
+
+Filtering process from all ppeptides to insreg differences
+```{r}
+phos_data_proc_insreg$ins3wayaovint_sig <- phos_data_proc_insreg$ins3wayaovint_q < 0.05
+summary_filtering_vec <- colSums(phos_data_proc_insreg[, c("insreg_tested",
+                                                           "ins3wayaovint_sig",
+                                  "insreg_bool",
+                                  "insregdiff_change_bool")], na.rm = TRUE)
+summary_filtering <- data.frame("level" = names(summary_filtering_vec),
+                                "Freq" = summary_filtering_vec)
+summary_filtering <- rbind(c("quantified", nrow(phos_data_proc_insreg)),
+                           summary_filtering)
+rownames(summary_filtering) <- summary_filtering$level
+```
+
+Summarise up and down
+```{r}
+###Summary of up, down, enh, supp, by Strain, Diet, StrainxDiet
+##Make summary
+
+types <- c("Strain", "Diet", "StrainxDiet")
+cols <- c("insregdiff_StrainCHOW_change_enhsupp",
+          "insregdiff_Diet_change_enhsupp",
+          "insregdiff_StrainxDiet_change_enhsupp")
+names(cols) <- types
+summary_list <- map(types, function(type){
+  #Set up column
+  col <- cols[type]
+  #Reduce data 
+  data <- phos_data_proc_insreg[!is.na(phos_data_proc_insreg[, col]), ]
+  data[, col] <- factor(data[, col],
+                                  levels = c("enhanced", "suppressed", "enhanced;suppressed"))
+  #Get summary
+  summary_df <- table(data[, col], data$insreg_dir) %>% as.data.frame 
+  summary_df <- dplyr::rename(summary_df,
+                       enhsupp = Var1, insreg_dir = Var2) %>%
+    subset(insreg_dir != "unregulated")
+  summary_df$type <- type
+  return(summary_df)
+})
+#Overall summary of insulin regulation
+insreg_summary <- table(phos_data_proc_insreg$insreg_dir) %>% as.data.frame %>%
+  dplyr::rename(insreg_dir = Var1) %>% subset(insreg_dir != "unregulated") %>%
+  mutate(enhsupp = "enhanced;suppressed", type = "Total", insreg_dir = as.character(insreg_dir)) %>%
+  .[, colnames(summary_list[[1]])]
+#Combine
+summary_df <- purrr::reduce(summary_list, rbind) %>%
+  mutate(enhsupp = as.character(enhsupp),
+         insreg_dir = as.character(insreg_dir))
+summary_df <- rbind(summary_df, insreg_summary) %>%
+  #Make factors and add columns
+  mutate(enhsupp = factor(enhsupp, levels = c("enhanced", "enhanced;suppressed", "suppressed")),
+         insreg_dir = factor(insreg_dir, levels = c("up", "down")),
+         type = factor(type, levels = c("Total", "Strain", "Diet", "StrainxDiet"))) %>%
+  .[order(.$insreg_dir, .$enhsupp), ] %>%
+  mutate(insregdir_enhsupp = paste(insreg_dir, enhsupp, sep = "_")) %>%
+  mutate(insregdir_enhsupp = factor(insregdir_enhsupp, levels = unique(insregdir_enhsupp)))
+#Reorder
+summary_df <- summary_df %>% .[order(.$type, .$insreg_dir, .$enhsupp), ]
+#Output
+updown_enhsupp_summary <- summary_df
+```
+
+Summary of S, D, SxD, and combinations
+```{r}
+#Make summary
+insregdiff_combs_summary <- summariser_twoway(phos_data_proc_insreg,
+                                              Var1 = "insregdiff_change_factors",
+                                              Var2 = "insreg_dir") %>%
+  subset(insregdiff_change_factors != "total" &
+           insreg_dir != "total" &
+           insreg_dir != "unregulated")
+#Add total insreg
+insreg_summary <- table(phos_data_proc_insreg$insreg_dir) %>% as.data.frame %>%
+  dplyr::rename(insreg_dir = Var1) %>% subset(insreg_dir != "unregulated") %>%
+  mutate(insregdiff_change_factors = "Total") %>%
+  .[, colnames(insregdiff_combs_summary)]
+#Combine
+insregdiff_combs_summary <- mutate(insregdiff_combs_summary,
+                                   insregdiff_change_factors = 
+                                     factor(insregdiff_change_factors,
+                                            levels = c("Total", "Strain", "Diet", "StrainxDiet",
+                                                       "Strain;Diet", "Strain;StrainxDiet"))) %>%
+  rbind(insreg_summary) %>%
+  mutate(insreg_dir = factor(insreg_dir, levels = c("up", "down"))) %>%
+  dplyr::rename(type = insregdiff_change_factors) %>%
+  .[order(.$type), ]
+```
+
+Summary of S and SxD distrubitions across strains
+```{r}
+#Strain
+insregdiffStrain_summary <- list(
+    "Strains" = insregdiff_strains_summariser(phos_data_proc_insreg,
+                                              strains = all_levels$Strain[all_levels$Strain != "C57Bl6J"],
+                                              "insregdiff_StrainCHOW_BLANK_change_enhsupp"),
+  "Combs" = insregdiff_combs_summariser(phos_data_proc_insreg,
+                                                        "insregdiff_StrainCHOW_change_conds",
+                                                        "insregdiff_StrainCHOW_BLANK_change_enhsupp")
+)
+
+#StrainxDiet
+insregdiffStrainxDiet_summary <- list(
+  "Strains" = insregdiff_strains_summariser(phos_data_proc_insreg,
+                                            strains = all_levels$Strain,
+                                            "insregdiff_StrainxDiet_BLANK_HFD_vs_BLANK_CHOW_change_enhsupp"),
+  "Combs" = insregdiff_combs_summariser(phos_data_proc_insreg,
+                                                        "insregdiff_StrainxDiet_change_conds",
+                                                        "insregdiff_StrainxDiet_BLANK_HFD_vs_BLANK_CHOW_change_enhsupp")
+)
+```
+
+Combine all summaries and output
+```{r}
+summaries_list <- list(
+  "filtering" = summary_filtering,
+  "overall_updown_enhsupp" = updown_enhsupp_summary,
+  "overall_updown_enhsupp_combinations" = insregdiff_combs_summary,
+  "Strain_diffs_strains_and_combs" = insregdiffStrain_summary,
+  "StrainxDiet_diffs_strains_and_combs" = insregdiffStrainxDiet_summary
+)
+save(summaries_list, file = "output/data/analysis/insulin_regulation/summaries_list__2.RData")
+```
+
+
+###Visualise summaries
+
+Barplots
+```{r}
+insresp_dir <- "output/images/analysis/insulin_regulation/insreg_changes/"
+##Overall insreg and S, D, SxD differences
+#Barplot for reg, S, D, SxD overall
+insreg_barplot_3cols(updown_enhsupp_summary, x_aes = "type",
+                     filename = paste(insresp_dir, 
+                                      "CHOW_Strain_aov/summary/barplot_insregdif", sep = ""),
+                     width = 2.25, height = 2)
+
+###Distributions of Strain and StrainxDiet differences
+##Strain
+Strain_StrainxDiet_bplot_args <- list(
+  "combs" = list("x_aes" = "combination", "list_arg" = "Combs",
+                 "width" = 3.5, height = 2),
+  "numconds" = list("x_aes" = "num_conds", "list_arg" = "Combs",
+                 "width" = 2.25, height = 2),
+  "strains" = list("x_aes" = "Strain", "list_arg" = "Strains",
+                 "width" = 2.25, height = 2)
+)
+map2(Strain_StrainxDiet_bplot_args, names(Strain_StrainxDiet_bplot_args),
+     function(args, name){
+       #Strain
+       insreg_barplot_3cols(insregdiffStrain_summary[[args$list_arg]], x_aes = args$x_aes,
+                     filename = paste(insresp_dir, 
+                                      "CHOW_Strain_aov/summary/barplot_insregdiffStrain_",
+                                      name,
+                                      sep = ""),
+                     width = args$width, height = args$height)
+       #StrainxDiet
+       insreg_barplot_3cols(insregdiffStrainxDiet_summary[[args$list_arg]], x_aes = args$x_aes,
+                     filename = paste(insresp_dir, 
+                                      "Diet_2wayaov/summary//barplot_insregdiffStrainxDiet_",
+                                      name,
+                                      sep = ""),
+                     width = args$width, height = args$height)
+     })
+```
+
+
+
+####Visualisations
+##Global visualisations 
+Heatmaps
+ins/bas
+```{r}
+##Strain differences
+heatmap_GxEphos_clustered(data = subset(phos_data_proc_insreg, insregdiff_StrainCHOW_change_bool == TRUE),
+                          clust_cols = all_FC_cols$Ins[grep("CHOW", all_FC_cols$Ins)],
+                          tile_border_size = 0,
+                          aspect_ratio_fixed = FALSE,
+                          scale_colours_manually = TRUE,
+                          mid_colour_threshold = 1.5,
+                          comparisons = c("Ins"),
+                          CHOW_only = TRUE)
+ggsave_pdfpng(file = "output/images/analysis/insulin_regulation/insreg_changes/CHOW_Strain_aov/hmap_CHOWStrain_aov_straindiff",
+              width = 2.5, height = 4)
+```
+
+HFD/CHOW inbas heatmaps
+```{r}
+for (strain in all_levels$Strain){
+  insbas_cols <- map(c("CHOW", "HFD"),
+                     ~paste(strain, ., "bas_vs", strain, ., "ins_logFC", sep = "_"))
+  insbas_diet_FC <- paste(strain, "_CHOW_insbas_vs_", strain, "_HFD_insbas_logFC", sep = "")
+  phos_data_proc_insreg[, insbas_diet_FC] <- phos_data_proc_insreg[, insbas_cols[[2]]] - 
+    phos_data_proc_insreg[, insbas_cols[[1]]]
+  data_wNAs_filt[, insbas_diet_FC] <- data_wNAs_filt[, insbas_cols[[2]]] - 
+    data_wNAs_filt[, insbas_cols[[1]]]
+}
+##Heatmap function
+insresp_dietresp_cols <- colnames(phos_data_proc_insreg)[grep("_insbas_", colnames(phos_data_proc_insreg))]
+heatmap_GxEphos_clustered_insbasdietresp <- function(data,
+                                                     ...){
+  #Cluster for ordering
+  dist_m <- dist(data[, insresp_dietresp_cols])
+  hclust <- hclust(dist_m)
+  data <- data[hclust$order, ]
+  data$order_col <- 1:nrow(data)
+  #Hmap
+  output_plot <- fc_sig_heatmap(data,
+               fc_cols_wo_pvals = insresp_dietresp_cols,
+               x_axis_names = all_levels$Strain,
+               order_column = "order_col",
+               ...)
+  return(output_plot)
+}
+
+##Heatmaps
+#All sites with Diet or StrainxDiet effect
+DSxD_overall <- rownames(subset(phos_data_proc_insreg,
+                                 insregdiff_Dietoverall_change_bool == TRUE),)
+heatmap_GxEphos_clustered_insbasdietresp(phos_data_proc_insreg[DSxD_overall, ],
+                          tile_border_size = 0,
+                          aspect_ratio_fixed = FALSE,
+                          scale_colours_manually = TRUE,
+                          mid_colour_threshold = 1.25,
+                          legend_title = "log2 insresp HFD/CHOW")
+ggsave_pdfpng("output/images/analysis/insulin_regulation/insreg_changes/Diet_2wayaov/hmap_DSxDaov_Dietoveralldiff_HFDonCHOW",
+              width = 4, height = 4)
+```
+
+Volcano plot
+```{r}
+##Volcano plot of all insreg
+volcano_plot_coloured(data = phos_data_proc_insreg,
+                          pval_col = "ins3wayaovint_q",
+                          FC_col = "ins_bas_logFC_StrainDietmax",
+                          colour_col = "insreg_dir",
+                          colour_col_levels = c("unregulated", "up", "down"),
+                          colour_col_colours = c(ins_updown_colours, 
+                                                "unregulated" = "black")) +
+      labs(x = "Max Strain-Diet log2(ins/bas)", y = "-log10 q-value")
+ggsave_pdfpng("output/images/analysis/insulin_regulation/global_vis/vplot_insregupdown", width = 3, height = 3)
+```
+
+
+
+####Characterising insulin regulation
+###PhosphositePlus insulin upstream annotations
+I see how many insulin-regulated phosphopeptides have insulin as an upstream treatment in PSP
+```{r}
+##Set up data
+PSP_insulin <- read_delim("data/intermediate/biol_databases/PSP/PSP_insulin_treatment_20221002.txt")
+insreg_data <- subset(phos_data_proc_insreg, insreg_bool == TRUE) %>%
+  annotation_search_mapback(annotation_groups = c("PSP"))
+##Make PSP insulin treatment into phos data
+insreg_data$PSP_insulin <- FALSE
+insreg_data[which(insreg_data$PSP_SITE_GRP_ID %in% PSP_insulin$SITE_GRP_ID), "PSP_insulin"] <- TRUE
+table(insreg_data$PSP_insulin)
+##Make and visualise summary
+insreg_PSP_insulin_sum <- summariser_twoway(insreg_data, "insreg_dir", "PSP_insulin") %>%
+  subset(insreg_dir %in% c("up", "down") &
+           PSP_insulin %in% c(FALSE, TRUE)) %>%
+  mutate(PSP_insulin = factor(PSP_insulin, levels = c(TRUE, FALSE)))
+  
+#Up and down
+ggplot(insreg_PSP_insulin_sum, 
+       aes(x = PSP_insulin, y = Freq, fill = insreg_dir)) +
+  geom_col(position = "stack", width = 0.8) + 
+  comfy_theme(include_xaxis = FALSE, rotate_x_text = TRUE) +
+  scale_fill_manual(values = ins_updown_colours,
+                    name = "Insulin regulation",
+                    labels = c("Upregulated", "Downregulated")) +
+  theme(axis.line.x = element_blank()) +
+  labs(y = "Phosphopeptides")
+ggsave_pdfpng("output/images/analysis/insulin_regulation/insreg/characterisation/bplot_PSPinsulin_insreg_updown",
+              width = 1.9, height = 1.5)
+#No up or down
+ggplot(insreg_PSP_insulin_sum, 
+       aes(x = PSP_insulin, y = Freq)) +
+  geom_col(position = "stack", width = 0.8, fill = "#000000") + 
+  comfy_theme(include_xaxis = FALSE, rotate_x_text = TRUE) +
+  theme(axis.line.x = element_blank()) +
+  labs(y = "Phosphopeptides")
+ggsave_pdfpng("output/images/analysis/insulin_regulation/insreg/characterisation/bplot_PSPinsulin_insreg",
+              width = 0.8, height = 1.5)
+```
+
+###Comparison to other insulin signalling ppomes
+Needham 2022 Nat Biotech
+```{r}
+###Functions
+unique_notNA <- function(x){
+  x <- x[which(!is.na(x))]
+  if (length(x) == 0){
+    return(NA)
+  } else {
+   x <- unique(x)
+   return(x) 
+  }
+}
+
+###Load in and process data
+needham_rawest <- read_csv("data/intermediate/biol_databases/supplementary_tables/Needham_NatBiotech_2022/Needham_2022_ppome.csv")
+needham_raw <- needham_rawest %>%
+  dplyr::rename("standard_name" = "gene_uniprot_site_multiplicity") %>%
+  mutate(uniprot = strsplit(standard_name, "_") %>% map(~.[2]) %>% unlist) %>%
+  mutate(uniprot_site = paste(uniprot, Site, sep = "_")) %>%
+  as.data.frame
+##Remove duplicate rows and assign rownames
+which(table(needham_raw$standard_name) > 1)
+duplicate_names <- c("MYH8_P13535_S1040_1",
+                     "MYH8_P13535_S1513_1",
+                     "TPM3_P06753_S207_1",
+                     "TPM3_P06753_S216_1")
+for (name in duplicate_names){
+  indices <- which(needham_raw$standard_name == name)
+  needham_raw <- needham_raw[-indices[1], ]
+}
+rownames(needham_raw) <- needham_raw$standard_name
+##Assign insreg with dir
+needham_raw$insreg_dir <- "unregulated"
+needham_raw[which(needham_raw$sig_RestIns_RestBas == "+" &
+                    needham_raw$logfc_RestIns_RestBas > 0), "insreg_dir"] <- "up"
+needham_raw[which(needham_raw$sig_RestIns_RestBas == "+" &
+                    needham_raw$logfc_RestIns_RestBas < 0), "insreg_dir"] <- "down"
+table(needham_raw$insreg_dir)
+##Add PSP SITE_GRP_IDs
+#Load in PSP
+psp_directory <- "data/intermediate/biol_databases/PSP/20220808/"
+source(paste(home_directory, "scripts/PSP_JvG.R", sep = ""))
+psp_data <- load_psp_data(filename = "Phosphorylation_site_dataset_20220808",
+                          directory = psp_directory)
+needham_SGIDs <- uniprotsite_to_sitegroupid(uniprot_sites = needham_raw$uniprot_site,
+                                            psp_phos_data = psp_data,
+                                       restrict_to_phos = TRUE)
+needham_raw$PSP_SITE_GRP_ID <- unlist(needham_SGIDs)
+
+
+###Map into my data
+phos_data_wneedham <- phos_data_proc_insreg %>%
+  annotation_search_mapback(., annotation_groups = "PSP") %>%
+  .[, c("gene", "uniprot", "site", "multiplicity",
+        "uniprot_site", "standard_name", "PSP_SITE_GRP_ID",
+        "insreg_bool", "insreg_dir")]
+common_SGIDs <- intersect(needham_raw$PSP_SITE_GRP_ID,
+                          phos_data_wneedham$PSP_SITE_GRP_ID)
+
+###Lists of regulated sites
+insreg_SGIDs_list <- map(list("up" = c("up"),
+                              "down" = c("down"),
+                              "either" = c("up", "down")), function(x){
+                                lst <- map(list("GxE" = phos_data_wneedham,
+                                             "needham" = needham_raw), function(data){
+                                               data <- data[which(data$insreg_dir %in% x), ]
+                                               return(unique_notNA(data$PSP_SITE_GRP_ID))
+                                             })
+                              })
+insreg_SGIDs_list_common <- map(insreg_SGIDs_list, function(lst){
+  map(lst, ~intersect(., common_SGIDs))
+})
+
+
+###Test overrepresentation
+insreg_overrep <- map(insreg_SGIDs_list_common, function(lst){
+  test <- fishers_DE_pathway(background_genes = common_SGIDs,
+                             DE_genes = lst$GxE,
+                             pathway_genes = lst$needham,
+                             alternative = "greater")
+  return(test)
+})
+
+###Visualise overlap
+##venn diagrams
+venn_dir <- "output/images/analysis/insulin_regulation/characterisation/vs_Needham2022/venn_common_insreg_"
+venn_width <- 3
+venn_height <- 3
+#either
+ggVennDiagram_nice(list = insreg_SGIDs_list_common$either,
+                   colours = brewer.pal(9, "Greys")[1:6],
+                   fill_limits = c(0, NA))
+ggsave_pdfpng(file = paste(venn_dir, "_either", sep = ""), width = venn_width, height = venn_height)
+```
+
+###Pathway enrichment
+Set up
+```{r}
+insreg_genes <- subset(phos_data_proc_insreg, insreg_bool == TRUE) %>% .$gene %>% unique
+bkd_genes <- unique(phos_data_proc_insreg$gene)
+```
+
+GO BPs
+```{r}
+###Run enrichment
+insreg_GOBP_enr <- GO_enricher(background_genes = bkd_genes,
+                                DE_genes = insreg_genes,
+                                gene_label = "SYMBOL",
+                                organism_database = org.Mm.eg.db,
+                                ontology = "BP",
+                                pathway_DE_intersection_threshold = 3)
+###Visualise
+enrichment_barplot_pval(data = insreg_GOBP_enr,
+                        pval_col = "adj_pval",
+                        colour_col = "ES_log2",
+                        colours = brewer.pal(9, "Greys"),
+                        limits_from0 = TRUE)
+ggsave_pdfpng(file = "output/images/analysis/insulin_regulation/characterisation/enrichment/bplot_insreg_GO_BP",
+              width = 6, height = 4)
+```
+
+
+###Output
+```{r}
+save(data_wNAs_filt,
+     file = "output/data/data_wNAs_filt__2.RData")
+save(phos_data_proc_insreg,
+     file = "output/data/phos_data_proc_insreg__4.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

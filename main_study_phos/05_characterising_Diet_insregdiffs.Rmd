@@ -1,0 +1,169 @@
+###Background
+Here I characterise Diet differences in insulin regulation as identified in 03_insulin_regulation.Rmd
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(qvalue)
+library(factoextra)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+source("scripts/09_insregdiff.R")
+source("scripts/11_enrichment.R")
+
+
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+load("data/intermediate/phos_data/data_wNAs_filt__2.RData")
+```
+
+###Set up data
+```{r}
+##Make insreg data
+insreg_data <- subset(phos_data_proc_insreg, insreg_bool == TRUE)
+insreg_data_wNAs_filt <- subset(data_wNAs_filt, insreg_bool == TRUE)
+```
+
+
+##Canonical insulin signalling proteins
+
+Set up
+```{r}
+##Directory
+canins_dir <- "output/images/analysis/insulin_regulation/insreg_changes/Diet_2wayaov/caninssig/"
+```
+
+This is a list of "canonical insulin signalling proteins" compiled from several ontologies, which features in 2022 Nat Biotech paper (doi.org/10.1038/s41587-021-01099-9 )
+```{r}
+###Set up
+##Load in and process
+can_ins_sig_proteins_EN <- readRDS("data/intermediate/biol_databases/can_ins_sig/can_ins_prots.rds") %>%
+  tolower %>% 
+  strsplit("") %>% map(~paste(c(toupper(.[1]), .[-1]), collapse = "")) %>% unlist
+
+##Combine with insreg_data
+insreg_data_caninsEN <- insreg_data
+insreg_data_caninsEN$caninssig_EN <- FALSE
+insreg_data_caninsEN[which(insreg_data_caninsEN$gene %in% can_ins_sig_proteins_EN), "caninssig_EN"] <- TRUE
+
+
+##Diet changes
+Dietdiff_caninsEN_summary <- summary_StrainxDiet_change(insreg_data_caninsEN,
+                                                    Var2 = "caninssig_EN")
+
+#y axis is proportion with strain effect
+ggplot(subset(Dietdiff_caninsEN_summary$Dietoverall, 
+              insregdiff_Dietoverall_change_bool == TRUE), 
+       aes(x = caninssig_EN, y = prop_of_caninssig_EN*100)) +
+  geom_col(fill = "black", width = 0.8) +
+  comfy_theme() +
+  labs(y = "% Diet effect",
+       x = "Canonical insulin signalling protein")
+ggsave_pdfpng(paste(canins_dir, "bplot_Dietoveralldiff_caninsEN_prop_ystrain",
+                    sep = ""),
+              width = 1.25, height = 1.5)
+
+
+#Fisher's exact for overrepresentation
+fishers_DE_pathway(background_genes = rownames(insreg_data_caninsEN),
+                   DE_genes = subset(insreg_data_caninsEN, 
+                                     caninssig_EN == TRUE) %>% rownames,
+                   pathway_genes = subset(insreg_data_caninsEN, 
+                                          insregdiff_Dietoverall_change_bool == TRUE) %>% rownames,
+                   alternative = "two.sided")
+```
+
+
+###PCA on log2 ins/bas
+```{r}
+source("scripts/01_QC.R")
+
+##Set up data
+data <- subset(data_wNAs_filt, insreg_bool == TRUE)
+rownames(data) <- strsplit(rownames(data), "_") %>% 
+  map(~paste(.[1], " ", .[3], " P", .[4], sep = "")) %>% unlist
+num_cols <- all_FC_cols$Ins
+
+##Make PCA
+pca <- prcomp(t(na.omit(data[, num_cols])), center = TRUE, scale. = FALSE)
+pca_df <- as.data.frame(pca$x, stringsAsFactors = FALSE) %>%
+  mutate(Strain = strsplit(rownames(.), "_") %>% map(~.[1]) %>% unlist,
+         Diet = strsplit(rownames(.), "_") %>% map(~.[2]) %>% unlist,
+         StrainDiet = strsplit(rownames(.), "_") %>% map(~paste(.[1], .[2], sep = "_")) %>% unlist) %>%
+  mutate(Strain = factor(Strain, levels = all_levels$Strain),
+         Diet = factor(Diet, levels = all_levels$Diet),
+         StrainDiet = factor(StrainDiet, levels = all_levels$StrainDiet))
+
+##Plot PCA
+PCs <- c(1, 2)
+PC_labels <- paste("PC", PCs, sep = "")
+corrplot_general(pca_df, xaxis = "PC1", yaxis = "PC2",
+                 include_basins = FALSE) +
+  labs(x = paste(c(PC_labels[1], " (",
+                     100*summary(pca)$importance[2, PCs[1]],
+                     "%)"),
+                   collapse = ""),
+         y = paste(c(PC_labels[2], " (",
+                     100*summary(pca)$importance[2, PCs[2]],
+                     "%)"),
+                   collapse = ""))
+ggsave_pdfpng(file = "output/images/analysis/insulin_regulation/insreg_changes/global_vis/PCA_insreg_insbasFCs",
+              width = 2.5, height = 1.5)
+```
+
+
+###Overlapping and exclusive Strain/Diet effects
+Do Strain and Diet effects co-occur?
+I assess whether sites with a Strain effect are more likely to have a Diet effect than by chance
+```{r}
+###Set up data
+insreg_ppeptides_list <- list(
+  "insreg" = rownames(insreg_data),
+  "Strain" = subset(insreg_data, insregdiff_StrainCHOW_change_bool == TRUE) %>% rownames,
+  "Dietoverall" = subset(insreg_data, insregdiff_Dietoverall_change_bool == TRUE) %>% rownames,
+  "StrainxDiet" = subset(insreg_data, insregdiff_StrainxDiet_change_bool == TRUE) %>% rownames,
+  "UniformDiet" = subset(insreg_data, insregdiff_Diet_change_bool == TRUE) %>% rownames
+)
+insreg_genes_list <- map(insreg_ppeptides_list, function(vec){
+  genes <- strsplit(vec, "_") %>% map(~.[1]) %>% unlist %>% unique
+  return(genes)
+})
+
+###Overrepresentation
+StrainDietoverrep <- fishers_DE_pathway(background_genes = insreg_ppeptides_list$insreg,
+                                        DE_genes = insreg_ppeptides_list$Strain,
+                                        pathway_genes = insreg_ppeptides_list$Dietoverall,
+                                        alternative = "two.sided")
+
+###Venn diagram
+ggVennDiagram_nice(list = insreg_ppeptides_list[c("Strain", "Dietoverall")],
+                   colours = brewer.pal(9, "Greys")[1:6],
+                   fill_limits = c(0, NA))
+ggsave_pdfpng("output/images/analysis/insulin_regulation/insreg_changes/global_vis/venn_StrainDiet_overlap",
+              width = 3, height = 3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

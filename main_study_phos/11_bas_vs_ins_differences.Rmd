@@ -1,0 +1,118 @@
+###Background
+Here I try to identify when Strain and Diet effects are due to differences in unstimulated or insulin-stimulated intensity
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(ggpattern)
+library(qvalue)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/13_bas_vs_ins_differences.R")
+
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+```
+
+
+####Filtering FCs
+Here I try to identify bas and ins changes simply by filtering the relevant FCs
+
+###Implement filtering
+
+Strain
+```{r}
+###Run filtering
+Strainchange_data <- subset(phos_data_proc_insreg, insregdiff_StrainCHOW_change_bool == TRUE)
+Strain_basins_changes <- basins_change_filterer(data = Strainchange_data,
+                                                enhsupp = Strainchange_data[, paste("insregdiff_StrainCHOW_",
+                                                             all_levels$Strain %>% .[which(. != "C57Bl6J")],
+                                                             "_change_enhsupp", sep = "")],
+                                                bas_FC_data = Strainchange_data[, all_FC_cols$Strain %>% 
+                                                                     .[grep("CHOW_bas", .)]],
+                                                ins_FC_data = Strainchange_data[, all_FC_cols$Strain %>% 
+                                                                     .[grep("CHOW_ins", .)]],
+                                                strains = all_levels$Strain %>% .[which(. != "C57Bl6J")],
+                                                FC_threshold = 0.379)
+
+###Summarise
+Strain_basins_summ <- basins_change_summariser(Strain_basins_changes)
+##Summary barplot
+basins_summ_bplot(Strain_basins_summ,
+                  ylab = "Strain-affected phosphopeptides",
+                  bplot_cols = fivestraincols_main[-1])
+ggsave_pdfpng(file = "output/images/analysis/insulin_regulation/insreg_changes/bas_vs_ins/bplot_Strain_basins_FC0379",
+              width = 2.5, height = 2)
+
+##Total numbers
+group_by(Strain_basins_summ, level) %>% summarise(num = sum(num))
+```
+
+Diet
+```{r}
+###Run filtering
+SxDchange_data <- subset(phos_data_proc_insreg, insregdiff_StrainxDiet_change_bool == TRUE)
+SxD_basins_changes <- basins_change_filterer(data = SxDchange_data,
+                                            enhsupp = SxDchange_data[, paste("insregdiff_StrainxDiet_",
+                                                         all_levels$Strain,
+                                                         "_HFD_vs_",
+                                                         all_levels$Strain, 
+                                                         "_CHOW_change_enhsupp", sep = "")],
+                                            bas_FC_data = SxDchange_data[, all_FC_cols$Diet %>% 
+                                                                 .[grep("_bas", .)]],
+                                            ins_FC_data = SxDchange_data[, all_FC_cols$Diet %>% 
+                                                                 .[grep("_ins", .)]],
+                                            strains = all_levels$Strain,
+                                            FC_threshold = 0.379)
+
+###Summarise
+SxD_basins_summ <- basins_change_summariser(SxD_basins_changes)
+##Summary barplot
+basins_summ_bplot(SxD_basins_summ,
+                  ylab = "StrainxDiet-affected phosphopeptides",
+                  bplot_cols = fivestraincols_main)
+ggsave_pdfpng(file = "output/images/analysis/insulin_regulation/insreg_changes/bas_vs_ins/bplot_SxD_basins_FC0379",
+              width = 2.5, height = 2)
+
+##Total numbers
+group_by(SxD_basins_summ, level) %>% summarise(num = sum(num))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

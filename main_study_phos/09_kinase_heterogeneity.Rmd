@@ -1,0 +1,122 @@
+###Background
+Here I perform analysis on kinase substrates to see how they well they agree/disagree with each other
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/PSP_JvG.R", sep = ""))
+psp_directory <- paste(home_directory,
+                      "data/biol_databases/phosphosite_plus/20220808/",
+                      sep = "")
+
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/01_QC.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+load("data/intermediate/phos_data/data_wNAs_filt__2.RData")
+#Add PSP_SITE_GRP_IDs
+phos_data_proc_insreg <- annotation_search_mapback(phos_data_proc_insreg,
+                                                   annotation_groups = "PSP")
+data_wNAs_filt <- annotation_search_mapback(data_wNAs_filt,
+                                                   annotation_groups = "PSP")
+
+#Load in kinase substrate data
+load("data/intermediate/biol_databases/psp_kin_sub_list_invivo_noauto_Gsk3i__1.RData")
+
+#Basnorm cols
+basnorm_cols <- colnames(data_wNAs_filt) %>% 
+                             .[grep("_basnorm_\\d+$", .)]
+phos_num_cols <- UIDs[which(UIDs %in% colnames(phos_data_proc_insreg))]
+```
+
+Functions
+```{r}
+###Function: Clustered correlation heatmap of kinase substrates
+kinase_substrate_heatmap <- function(data,
+                                     kinase,
+                                     num_cols,
+                                     kin_sub_list = psp_kin_sub_list_invivo_noauto_Gsk3i){
+  ##Set up data
+  data_kinase <- subset(data,
+                               PSP_SITE_GRP_ID %in% kin_sub_list[[kinase]])
+  ##Correlation heatmap
+  corr_m <- corr_m_maker(t(data_kinase[, num_cols]),
+                             num_cols = rownames(data_kinase))
+  corrplot(corr_m$corr_m,
+             method = "color",
+             type = "upper",
+             order = "hclust",
+             #Gradient
+             col = colorRampPalette(rev(brewer.pal(name = "RdBu", n = 11)))(100),
+             #Text parameters
+             tl.cex = 0.5*7/6,
+             tl.col = "#000000",
+             #legend paramters,
+             cl.cex = 0.5*7/6,
+             cl.align.text = "l")
+}
+```
+
+
+
+
+###Case study - Akt
+```{r}
+###Set up
+library(ComplexHeatmap)
+library(circlize)
+##Correaltion matrix
+Akt_insreg_insresp <- subset(data_wNAs_filt, insreg_bool == TRUE)
+Akt_num_data <- subset(Akt_insreg_insresp, PSP_SITE_GRP_ID %in%
+                          psp_kin_sub_list_invivo_noauto_Gsk3i$Akt) %>%
+                   .[, basnorm_cols] %>%
+  t
+colnames(Akt_num_data) <- strsplit(colnames(Akt_num_data), "_") %>% 
+  map(~paste(.[1], " ", .[3], " P", .[4], sep = "")) %>% unlist
+Akt_cor_m <- cor(Akt_num_data, 
+                 use = "pairwise.complete.obs")
+##Correlation colour scale
+#Function to allow adjustment of colour gradient
+corr_scale <- function(mid_threshold = 0.4){
+  #Make positive numbers
+  pos_nums <- c(seq(from = 0, to = mid_threshold, length.out = 3),
+                seq(from = mid_threshold, to = 1, length.out = 3)[-1])
+  neg_nums <- -(pos_nums)
+  all_nums <- sort(unique(c(neg_nums, pos_nums)))
+  return(all_nums)
+}
+hmap_cols <- colorRamp2(breaks = corr_scale(0.5),
+                        colors = rev(brewer.pal(9, "RdBu")))
+
+##hclsut within WGCNA clusters
+pdf("output/images/analysis/kinases/heterogeneity/Akt/corrmap_Aktsubs_square.pdf",
+    width = 7, height = 6)
+Heatmap(Akt_cor_m, col = hmap_cols,
+        show_row_names = T, show_column_names = T)
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

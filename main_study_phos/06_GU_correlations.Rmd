@@ -1,0 +1,176 @@
+###Background
+Here I correlate phosphorylation with glucose uptake
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(qvalue)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/boxplots_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+source("scripts/10_GU_correlations.R")
+source("scripts/11_enrichment.R")
+
+
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+load("data/intermediate/phos_data/phos_num_cols__1.RData")
+load("data/intermediate/phos_data/data_wNAs_filt__2.RData")
+load("data/intermediate/pheno_data/pheno_data__5.RData")
+phos_num_cols_basnorm <- colnames(phos_data_proc_insreg)[grep("basnorm_\\d+", 
+                                                              colnames(phos_data_proc_insreg))]
+```
+
+###Set up data
+```{r}
+##Add filtered basnorm FCs to main data
+phos_num_cols_basnormfilt <- gsub("basnorm", "basnormfilt", phos_num_cols_basnorm)
+phos_data_proc_insreg[, phos_num_cols_basnormfilt] <- NA
+phos_data_proc_insreg[rownames(data_wNAs_filt), phos_num_cols_basnormfilt] <- data_wNAs_filt[, phos_num_cols_basnorm]
+```
+
+
+####Correlating insulin-regulated ppeptides
+Set up data
+```{r}
+###Get insreg data and add annotation
+insreg_data_corrs <- subset(phos_data_proc_insreg, insreg_bool == TRUE) %>%
+  annotation_search_mapback
+```
+
+Run correlations and global exploration
+```{r}
+#Correlate the insulin response (filtered) or absolute intensity
+insreg_corrs_results <- list(
+  "insresp" = phos_GU_correlator_mult(phos_data = insreg_data_corrs,
+                                      pheno_data = pheno_data,
+                                     phos_num_cols = phos_num_cols_basnormfilt,
+                                     phos_UIDs = gsub("basnormfilt_", "",
+                                                      phos_num_cols_basnormfilt)),
+  "absint" = phos_GU_correlator_mult(phos_data = insreg_data_corrs,
+                                      pheno_data = pheno_data,
+                                     phos_num_cols = phos_num_cols,
+                                     phos_UIDs = phos_num_cols)
+)
+
+#Classify as significantly correlated
+#Set up parameters
+pval_cutoff = 0.1
+r_cutoff = 0.35
+
+#Map
+insreg_corrs_results <- map(insreg_corrs_results,
+                            function(data){
+                              #Correlated with r cutoff
+                              data$correlated <- FALSE
+                              data[which(data[, "cor_q"] < pval_cutoff &
+                                 abs(data[, "cor_r"]) > r_cutoff), "correlated"] <- TRUE
+                              #Correlated without r cutoff
+                              data$correlated_wor <- FALSE
+                              data[which(data[, "cor_q"] < pval_cutoff), "correlated_wor"] <- TRUE
+                              return(data)
+                              })
+```
+
+
+###Global visualisations
+```{r}
+##Volcano plots
+#Prep labels
+insreg_corrs_results <- map(insreg_corrs_results,
+                            function(data){
+                              data$ppeptide <- strsplit(rownames(data), "_") %>%
+                                map(~paste(.[1], " ",
+                                           .[3], " P", .[4], sep = "")) %>% unlist
+                              return(data)
+                            })
+#Plot
+map2(insreg_corrs_results, names(insreg_corrs_results),
+     function(data, name){
+       ##Plot r-values on x-axis
+        #Plot with pvalues and labels
+        #Label the first 15 ppeptides that are significant
+        label_rows <- subset(data, correlated == TRUE) %>% 
+          .[1:min(15, nrow(.)), ] %>%
+          rownames
+        volcano_plot_coloured(data,
+                              pval_col = "cor_p",
+                              FC_col = "cor_r",
+                              colour_col = "correlated",
+                              colour_col_levels = c(FALSE, TRUE),
+                              colour_col_colours = c("grey", "#69af69"),
+                              label_col = "ppeptide",
+                                rows_to_label = label_rows) +
+          labs(x = "r", y = "-log10 p-value")
+        ggsave_pdfpng(paste("output/images/analysis/GU_corrs/global_vis/vplot_insreg_GU_p_",
+                            name, "_lab", sep = ""),
+                      width = 2, height = 2)
+     })
+```
+
+###Tbc1d4 sites
+```{r}
+###Insreg sites
+##Set up positive controls sites
+posctrl_sites <- c("Tbc1d4_Q8BYJ6_S324_1",
+                   "Tbc1d4_Q8BYJ6_S595_1",
+                   "Tbc1d4_Q8BYJ6_T649_1")
+##Volcano plots
+#set up
+insreg_corrs_results_tbc1d4 <- map(insreg_corrs_results, function(data){
+  data$Tbc1d4 <- FALSE
+  data[posctrl_sites, "Tbc1d4"] <- TRUE
+  data$ppeptide <- strsplit(rownames(data), "_") %>% 
+    map(~paste(.[1], " ", .[3], " P", .[4], sep = "")) %>% unlist
+  return(data)
+})
+#plot
+map2(insreg_corrs_results_tbc1d4, names(insreg_corrs_results_tbc1d4), function(data, name){
+  volcano_plot_coloured(data,
+                        pval_col = "cor_p",
+                        FC_col = "cor_r",
+                        colour_col = "Tbc1d4",
+                        colour_col_levels = c(FALSE, TRUE),
+                        colour_col_colours = c("grey", "black"),
+                        label_col = "ppeptide",
+                          rows_to_label = posctrl_sites) +
+    labs(x = "r", y = "-log10 p-value") 
+  ggsave_pdfpng(file = paste("output/images/analysis/GU_corrs/vplot_insregGUcorr_Tbc1d4",
+                             name, sep = "_"),
+                width = 2, height = 2)
+})
+```
+
+###Output
+```{r}
+save(insreg_corrs_results,
+     file = "output/data/analysis/GU_corrs/insreg_corrs_results.RData")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,555 @@
+###Background
+Here I perform network correlation analysis to identify co-regulated clusters of insulin-regualted ppeptides
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/PSP_JvG.R", sep = ""))
+psp_directory <- paste(home_directory,
+                      "data/biol_databases/phosphosite_plus/20220808/",
+                      sep = "")
+
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/stats_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/01_QC.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+source("scripts/11_enrichment.R")
+source("scripts/12_correlation_network_analysis.R")
+
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+load("data/intermediate/phos_data/data_wNAs_filt__2.RData")
+#Add PSP_SITE_GRP_IDs
+phos_data_proc_insreg <- annotation_search_mapback(phos_data_proc_insreg,
+                                                   annotation_groups = "PSP")
+data_wNAs_filt <- annotation_search_mapback(data_wNAs_filt,
+                                                   annotation_groups = "PSP")
+
+#Load in kinase substrate data
+load("data/intermediate/biol_databases/psp_kin_sub_list_invivo_noauto_Gsk3i__1.RData")
+
+#Basnorm cols
+basnorm_cols <- colnames(data_wNAs_filt) %>% 
+                             .[grep("_basnorm_\\d+$", .)]
+phos_num_cols <- UIDs[which(UIDs %in% colnames(phos_data_proc_insreg))]
+
+#Clsuter colours
+cluster_colours <- c("1" = "#7f4393",
+                     "2" = "#ac5781",
+                     "3" = "#ba984d",
+                     "4" = "#e4e029",
+                     "5" = "#b2cc37",
+                     "6" = "#82ac85",
+                     "7" = "#c4d7ef",
+                     "8" = "#287240")
+```
+
+
+####WGCNA
+
+###Run WGCNA
+```{r}
+##Set up
+data_preWGCNA <- t(subset(data_wNAs_filt, insreg_bool == TRUE) %>% .[, basnorm_cols])
+
+##Get soft threshold
+#Power = 3 gives a high fit but then it drops massively
+indices <- 1:30
+soft_thresh <- pickSoftThreshold(data_preWGCNA, verbose = 5,
+                                 powerVector = indices)
+plot(soft_thresh$fitIndices[, 1],
+     -sign(soft_thresh$fitIndices[, 3])*soft_thresh$fitIndices[, 2])
+
+##Run WGCNA
+WGCNA_net <- blockwiseModules(data_preWGCNA, power = 3,
+                        TOMtype = "unsigned", 
+                        minModuleSize = 15, deepSplit = 3,
+                        reassignThreshold = 0, mergeCutHeight = 0.25,
+                        numericLabels = TRUE, pamRespectsDendro = FALSE,
+                        verbose = 3)
+
+#Extract clusters
+clust_names <- sort(unique(WGCNA_net$colors))
+WGCNA_clusters <- map(clust_names,
+                      ~names(WGCNA_net$colors)[which(WGCNA_net$colors == .)])
+names(WGCNA_clusters) <- as.character(clust_names)
+WGCNA_clusters <- WGCNA_clusters[which(names(WGCNA_clusters) != "0")]
+WGCNA_clusters_genes <- map(WGCNA_clusters, function(x){
+  x_split <- strsplit(x, "_")
+  x_genes <- map(x_split, ~.[1]) %>% unlist %>% unique
+  return(x_genes)
+})
+
+##Inspect WGCNA output
+table(WGCNA_net$colors)
+mergedColors <- labels2colors(WGCNA_net$colors)
+plotDendroAndColors(WGCNA_net$dendrograms[[1]],
+                    mergedColors[WGCNA_net$blockGenes[[1]]],
+                    "Module colours",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHand = 0.05)
+```
+
+###Visualise
+Basic heatmap
+```{r}
+###Set up
+##Correaltion natrix
+WGCNA_cor_m <- cor(data_preWGCNA, use = "pairwise.complete.obs")
+##Correlation colour scale
+#Function to allow adjustment of colour gradient
+corr_scale <- function(mid_threshold = 0.5){
+  #Make positive numbers
+  pos_nums <- c(seq(from = 0, to = mid_threshold, length.out = 3),
+                seq(from = mid_threshold, to = 1, length.out = 3)[-1])
+  neg_nums <- -(pos_nums)
+  all_nums <- sort(unique(c(neg_nums, pos_nums)))
+  return(all_nums)
+}
+hmap_cols <- colorRamp2(breaks = corr_scale(0.5),
+                        colors = rev(brewer.pal(9, "RdBu")))
+##Annotation for cluster
+cluster_cols <- c("#989898",
+                  cluster_colours)
+names(cluster_cols) <- unique(WGCNA_net$colors)
+clust_lab <- HeatmapAnnotation(cluster = WGCNA_net$colors,
+                               col = list(cluster = cluster_cols))
+##Ordered data by hclust within WGCNA
+data_preWGCNA_ordered <- hclust_within_WGCNAclust(data_preWGCNA,
+                                                  WGCNA_net)
+
+##hclsut within WGCNA clusters
+pdf(paste("output/images/analysis/corr_network/WGCNA/",
+          "corhmap_insreg_WGCNA_smallerclust",
+          ".pdf",
+          sep = ""),
+    width = 7, height = 6)
+Heatmap(WGCNA_cor_m, col = hmap_cols,
+        show_row_names = F, show_column_names = F,
+        row_order = colnames(data_preWGCNA_ordered), column_order = colnames(data_preWGCNA_ordered),
+        top_annotation = clust_lab)
+dev.off()
+```
+
+
+
+####Characterise clusters
+
+###GO enrichment
+Perform enrichment across all clusters
+```{r}
+##Set up
+pathway_DE_intersection_threshold <- 3
+
+##Get GO pathways lists
+relevant_GOIDs <- map(c("BP" = "BP", "CC" = "CC"), function(ont){
+  ##Get all pathways that intersect sufficiently with at least one cluster
+  relevant_GOIDs_list <- relevant_GOIDS(DE_genes = unique(unlist(WGCNA_clusters_genes)),
+                                        gene_label = "SYMBOL",
+                                        organism_database = org.Mm.eg.db,
+                                        ontology = ont)
+  #Keep only those that intersect sufficiently with at least one cluster
+  GOIDs_int_bool_list <- map(WGCNA_clusters_genes, function(clust){
+    map(relevant_GOIDs_list, 
+      ~length(intersect(., clust)) >= pathway_DE_intersection_threshold) %>% 
+    unlist
+  })
+  GOIDs_int_bool_sum <- purrr::reduce(GOIDs_int_bool_list, cbind) %>%
+    rowSums
+  relevant_GOIDs_list_filt <- relevant_GOIDs_list[which(GOIDs_int_bool_sum > 0)]
+  #Rename using GO term
+  GO_terms <- AnnotationDbi::select(GO.db,
+                                   names(relevant_GOIDs_list_filt),
+                                   columns = "TERM",
+                                   keytype = "GOID")$TERM
+  names(relevant_GOIDs_list_filt) <- GO_terms
+     return(relevant_GOIDs_list_filt)
+})
+
+##Run enrichment
+#Background: Entire ppome
+cluster_overrep_GO_bkgppome_compr_df <- map(relevant_GOIDs, function(GOIDs){
+  clust_enricher(clust_genes = WGCNA_clusters_genes,
+                 bkd_genes = unique(phos_data_proc_insreg$gene),
+                 pways_list = GOIDs)
+})
+```
+
+Visualisation
+
+Heatmaps of enrichment
+```{r}
+GO_dir <- "output/images/analysis/corr_network/WGCNA/GO/hmap_WGCNA_GO_"
+##Bkd: ppome
+#Same colour scale
+overrep_hmap(data = cluster_overrep_GO_bkgppome_compr_df$BP,
+             scale_colours_manually = TRUE,
+             mid_colour_threshold = 3,
+             high_colour_threshold = 6.7)
+ggsave_pdfpng(paste(GO_dir, "BP_samescale", sep = ""),
+              width = 5.5, height = 2.5)
+overrep_hmap(data = cluster_overrep_GO_bkgppome_compr_df$CC,
+             scale_colours_manually = TRUE,
+             mid_colour_threshold = 3,
+             high_colour_threshold= 6.7)
+ggsave_pdfpng(paste(GO_dir, "CC_samescale", sep = ""),
+              width = 4, height = 2)
+#Diff colour scale
+overrep_hmap(data = cluster_overrep_GO_bkgppome_compr_df$BP,
+             scale_colours_manually = TRUE,
+             mid_colour_threshold = 4)
+ggsave_pdfpng(paste(GO_dir, "BP", sep = ""),
+              width = 5.5, height = 2.5)
+overrep_hmap(data = cluster_overrep_GO_bkgppome_compr_df$CC,
+             scale_colours_manually = TRUE,
+             mid_colour_threshold = 2)
+ggsave_pdfpng(paste(GO_dir, "CC", sep = ""),
+              width = 4, height = 2)
+```
+
+
+###Kinase enrichment
+
+
+
+Perform enrichment
+```{r}
+##Set up
+load("data/intermediate/biol_databases/psp_kin_sub_list_invivo_noauto_Gsk3i__1.RData")
+##Get WGCNA cluster SITE_GRP_IDs
+WGCNA_clusters_SGIDs <- map(WGCNA_clusters, function(clust){
+  SITE_GRP_IDs <- phos_data_annotation[clust, "PSP_SITE_GRP_ID"] %>%
+    .[which(!is.na(.))] %>% unique
+})
+
+##Restrict to kinases with sufficient overlap
+##Set up
+pathway_DE_intersection_threshold <- 3
+
+psp_kin_sub_int_bool_list <- map(WGCNA_clusters_SGIDs, function(clust){
+  map(psp_kin_sub_list_invivo_noauto_Gsk3i,
+      ~length(intersect(., clust)) >= pathway_DE_intersection_threshold) %>% unlist
+})
+psp_kin_sub_int_bool_sum <- purrr::reduce(psp_kin_sub_int_bool_list, cbind) %>%
+  rowSums
+psp_kin_sub_list_relevant <- psp_kin_sub_list_invivo_noauto_Gsk3i[which(psp_kin_sub_int_bool_sum > 0)]
+
+##Remove promiscuous psites
+#Get promiscuos SGIDS. promisc_threshold = 4 was used for KSEA
+SGIDs <- unique(unlist(WGCNA_clusters_SGIDs))
+promisc_bool <- promisc_psites_trim(stat_names = SGIDs,
+                                    kin_sub_list = psp_kin_sub_list_relevant,
+                                    promisc_threshold = 4)
+promisc_SGIDs <- SGIDs[!promisc_bool]
+#Remove from kinase sub list
+psp_kin_sub_list_relevant_trim <- map(psp_kin_sub_list_relevant, function(subs){
+  subs <- subs[which(subs %in% promisc_SGIDs == FALSE)]
+  if (length(subs) == 0){
+    return(NULL)
+  } else {
+    return(subs) 
+  }
+})
+null_bool <- map(psp_kin_sub_list_relevant_trim, ~!is.null(.)) %>% unlist
+psp_kin_sub_list_relevant_trim <- psp_kin_sub_list_relevant_trim[null_bool]
+
+##Run enrichment
+#Bkd: Entire ppome
+kinase_enr_compr_df <- clust_enricher(clust_genes = WGCNA_clusters_SGIDs,
+                                      bkd_genes = unique(phos_data_annotation$SITE_GRP_ID),
+                                      pways_list = psp_kin_sub_list_relevant_trim)
+```
+
+Visualise
+```{r}
+###Heatmap of kinases
+overrep_hmap(kinase_enr_compr_df)
+ggsave_pdfpng("output/images/analysis/corr_network/WGCNA/kinases/hmap_WGCNA_kin_overrep",
+              width = 4, height = 2)
+overrep_hmap(kinase_enr_compr_df,
+             scale_colours_manually = TRUE,
+             mid_colour_threshold = 3,
+             high_colour_threshold = 6.7)
+ggsave_pdfpng("output/images/analysis/corr_network/WGCNA/kinases/hmap_WGCNA_kin_overrep_samescale",
+              width = 4, height = 2)
+```
+
+###SH 2013 temporal clusters
+Process data
+```{r}
+###Load in SH data
+library(readxl)
+SH_rawest <- read_xlsx("data/intermediate/biol_databases/supplementary_tables/Sean Cell Metab 2013/sean_cell_metab_2013_mmc4.xlsx")
+SH_raw <- SH_rawest %>%
+  rename("Gene Name" = "gene",
+         "Phosphorylated Amino Acid" = "AA",
+         "IPI 3.68 Position in Protein" = "position",
+         "Sequence Window" = "sequence_window")
+
+###Prep insreg data
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+##Make truncated sequence window for GxE ppome
+phos_data_proc_insreg$sequence_window_trunc <- strsplit(phos_data_proc_insreg$sequence_window, "") %>%
+  map(~paste(.[10:22], collapse = "")) %>% unlist
+##Insreg data
+GxE_insreg <- subset(phos_data_proc_insreg, insreg_bool == TRUE)
+
+###Map SH data over
+##How many map into SH data by sequence_window?
+#283/441
+length(which(GxE_insreg$sequence_window_trunc %in% SH_raw$sequence_window))
+
+##Get matches in SH data
+insreg_matches <- map(GxE_insreg$sequence_window_trunc, ~which(SH_raw$sequence_window == .))
+insreg_matches_num <- map(insreg_matches, length) %>% unlist
+
+##Rectify multiple matches (based on my judgement of gene + site)
+insreg_matches[[which(insreg_matches_num == 2)]] <- which(SH_raw$UniqueID == 
+                                                            "IPI00119663_185_TGFLTEYVATRWY_Y")
+insreg_matches[[which(insreg_matches_num == 3)]] <- which(SH_raw$UniqueID == 
+                                                            "IPI00115040_66_SPPRSQTPQDTNR_T")
+
+##Make df of matches
+insreg_matches_df <- GxE_insreg[which(insreg_matches_num > 0), c("standard_name",
+                                    "gene", "uniprot", "site", "uniprot_site",
+                                    "sequence_window", "sequence_window_trunc")]
+insreg_matches_df$position <- gsub("[STY]", "", insreg_matches_df$site)
+colnames(insreg_matches_df) <- paste("GxE_", colnames(insreg_matches_df), sep = "")
+SH_matches <- SH_raw[unlist(insreg_matches), c("gene", "AA", "position", "UniqueID", "sequence_window",
+                                               "Uniprot ID")]
+colnames(SH_matches) <- paste("SH_", colnames(SH_matches), sep = "")
+insreg_matches_df <- cbind(insreg_matches_df, SH_matches)
+
+##Inspect
+#When do sites not match?
+subset(insreg_matches_df, SH_position != GxE_position) %>% .[, c("GxE_standard_name", "SH_gene", "SH_Uniprot ID")]
+
+#When do sites and genes not match?
+site_gene_nomatch <- subset(insreg_matches_df, SH_position != GxE_position &
+         SH_gene != GxE_gene) %>% .[, c("GxE_standard_name", "SH_gene", "SH_UniqueID")]
+#By manual inspection, all of these cases match to different names for the same gene (genecards search)
+site_gene_fixmatch <- c("Akap",
+                        "Epb4.1",
+                        "Nkcc1",
+                        "Mkl2",
+                        "Bsg4",
+                        "Jip4",
+                        "Atbp",
+                        "Est1c",
+                        "Kiaa0664",
+                        "Kiaa1296",
+                        "Lrrc35",
+                        "Kiaa0819",
+                        "Plec1",
+                        "Af6",
+                        "Tcfeb")
+##Final mapping
+GxE_insreg[, c("SH_UniqueID", "SH_cluster")] <- NA
+for (i in 1:nrow(GxE_insreg)){
+  match <- insreg_matches[[i]]
+  if (length(match) > 0){
+    GxE_insreg[i, c("SH_UniqueID", "SH_cluster")] <- 
+      SH_raw[match, c("UniqueID", "Cluster")]
+  }
+}
+
+##Classification of different clusters
+SH_cluster_info <- read_xlsx("data/intermediate/biol_databases/supplementary_tables/Sean Cell Metab 2013/sean_cell_metab_2013_clusterinfo.xlsx", sheet = "info")
+#Map into GxE_insreg
+clustinfo_cols <- colnames(SH_cluster_info)[-1]
+GxE_insreg[, paste("SH_", clustinfo_cols, sep = "")] <- NA
+for (i in 1:nrow(GxE_insreg)){
+  SH_clust <- GxE_insreg$SH_cluster[i]
+  if (!is.na(SH_clust)){
+    GxE_insreg[i, paste("SH_", clustinfo_cols, sep = "")] <-
+      SH_cluster_info[which(SH_cluster_info$cluster == SH_clust), clustinfo_cols]
+  }
+}
+
+insreg_data_SHmapped <- GxE_insreg
+```
+
+
+Visualise
+```{r}
+###Summary of peak speed in each cluster
+##Prep data
+#Add WGCNA cluster to data
+insreg_data_SHmapped$WGCNA_cluster <- factor(WGCNA_net$colors[rownames(insreg_data_SHmapped)],
+                                             levels = sort(unique(WGCNA_net$colors)))
+#Turn speed into factor
+insreg_data_SHmapped$SH_peak_time <- factor(insreg_data_SHmapped$SH_peak_time,
+                                            levels = sort(unique(insreg_data_SHmapped$SH_peak_time)))
+
+##Pairwise summary of WGCNA cluster and peak time
+WGCNAclust_SHpeaktime_summary <-summariser_twoway_prop(insreg_data_SHmapped,
+                       Var1 = "WGCNA_cluster",
+                       Var2 = "SH_peak_time")
+
+##Summarise number of ppeptides in each cluster
+num_clust_SH <- subset(insreg_data_SHmapped, !is.na(SH_peak_time)) %>% .$WGCNA_cluster %>% table
+num_clust <- table(WGCNA_net$colors)
+
+num_clust_SH/num_clust
+
+sum(num_clust_SH[-1])
+sum(table(WGCNA_net$colors)[-1])
+
+
+##Plot
+#Proportion
+ggplot(WGCNAclust_SHpeaktime_summary,
+       aes(x = WGCNA_cluster, y = prop_of_WGCNA_cluster*100,
+           fill = SH_peak_time)) +
+  geom_col() +
+  scale_fill_manual(values = brewer.pal(7, "Reds"),
+                    name = "Peak time (min)") +
+  comfy_theme(include_xaxis = FALSE) +
+  labs(x = "Cluster", y = "% of phosphopeptides in cluster")
+ggsave_pdfpng("output/images/analysis/corr_network/WGCNA/SH_2013/barplot_WGCNAclust_SHpeaktime_prop",
+              width = 3, height = 2)
+#Frequency
+ggplot(WGCNAclust_SHpeaktime_summary,
+       aes(x = WGCNA_cluster, y = Freq,
+           fill = SH_peak_time)) +
+  geom_col() +
+  scale_fill_manual(values = brewer.pal(7, "Reds"),
+                    name = "Peak time (min)") +
+  comfy_theme(include_xaxis = FALSE) +
+  labs(x = "Cluster", y = "Phosphopeptides")
+ggsave_pdfpng("output/images/analysis/corr_network/WGCNA/SH_2013/barplot_WGCNAclust_SHpeaktime_Freq",
+              width = 3, height = 2)
+```
+
+
+
+
+
+
+####Eigenpeptide analysis
+Here I look at the module eigengenes, which I term "eigenpeptides"
+
+Initial preparation and visualisation
+```{r}
+###Prepare eigenpeptide data
+##Extract eigenpeptides
+WGCNA_eigenpeptides <- WGCNA_net$MEs %>%
+  .[, order(colnames(.))] %>% .[, -1]
+colnames(WGCNA_eigenpeptides) <- gsub("ME", "", colnames(WGCNA_eigenpeptides)) %>%
+  paste(., "_eigenpept", sep = "")
+WGCNA_eigenpeptides <- t(WGCNA_eigenpeptides) %>% as.data.frame
+##StrainDiet medians
+num_data <- WGCNA_eigenpeptides[, grep("basnorm_\\d+$", colnames(WGCNA_eigenpeptides))]
+StrainDiet_medians <- map(all_levels$StrainDiet, function(strain_diet){
+  apply(num_data[, grep(strain_diet, colnames(num_data))],
+      1, FUN = "median", na.rm = TRUE)
+}) %>% purrr::reduce(cbind) %>% as.data.frame
+colnames(StrainDiet_medians) <- map(all_levels$StrainDiet, 
+                                    ~paste(., "_bas_vs_", ., "_ins_logFC", sep = "")) %>% unlist
+WGCNA_eigenpeptides <- cbind(WGCNA_eigenpeptides, StrainDiet_medians)
+
+
+
+
+
+###Visualise
+##Stacked lines
+##Prep data
+eigenpep_FC_long <- WGCNA_eigenpeptides %>%
+  .[, grep("logFC$", colnames(.))] %>%
+  mutate(cluster = strsplit(rownames(.), "_") %>% map(~.[1]) %>% unlist) %>%
+  pivot_longer(cols = colnames(.)[grep("logFC$", colnames(.))],
+               names_to = "FC_col", values_to = "val") %>%
+  mutate(strain_diet = factor(gsub("_bas_.+", "", FC_col),
+                              levels = all_levels$StrainDiet))
+
+##Plot
+ggplot(eigenpep_FC_long, 
+       aes(x = strain_diet, y = val, group = cluster, colour = cluster)) +
+  #geoms
+  geom_line(linewidth = 0.235) +
+  geom_point(size = 0.5, shape = 16) +
+  #Themes
+  scale_colour_manual(values = cluster_colours) +
+  comfy_theme(include_xaxis = FALSE, rotate_x_text = TRUE,
+              include_legend = FALSE) +
+  theme(axis.title.x = element_blank()) +
+  labs(y = "Relative insulin response") +
+  #Facet
+  facet_wrap(facets = vars(cluster), ncol = 1,
+             strip.position = "left")
+ggsave_pdfpng(file = "output/images/analysis/corr_network/WGCNA/eigenpeptides/lplot_eigenpept_insresp",
+              width = 2, height = 3)
+```
+
+
+
+
+
+Correlate with glucose uptake
+```{r}
+##Load in and combine data
+source("scripts/10_GU_correlations.R")
+load("data/intermediate/pheno_data/pheno_data__5.RData")
+
+eigenpept_GU_df <- combine_phos_pheno_data(phos_data = WGCNA_eigenpeptides,
+                        pheno_data = pheno_data,
+                        pheno_cols = c("sol_p2DG_weightnorm_rate"),
+                        phos_rows = rownames(WGCNA_eigenpeptides),
+                        phos_num_cols = basnorm_cols,
+                        phos_UIDs = gsub("basnorm_", "", basnorm_cols))
+##Run correlations
+eigenpept_GU_corr <- phos_GU_correlator_mult_fromcomb(eigenpept_GU_df, 
+                                                     ppeptides =rownames(WGCNA_eigenpeptides),
+                                                     cor_method = "pearson")
+
+###Visualise
+##Barplot of correlations
+eigenpept_GU_corr <- mutate(eigenpept_GU_corr,
+                            cor_p_nlog10 = -log10(cor_p),
+                            cluster = strsplit(rownames(eigenpept_GU_corr), "_") %>% 
+                              map(~.[1]) %>% unlist)
+eigenpept_GU_corr <- eigenpept_GU_corr %>% .[order(.$cor_r), ] %>%
+  mutate(cluster = factor(cluster, levels = unique(cluster)))
+#Plot
+ggplot(eigenpept_GU_corr, aes(x = cor_r, y = cluster, fill = cor_p_nlog10)) +
+  geom_col() +
+  geom_vline(xintercept = 0,
+             size = 0.235, colour = "black") +
+  comfy_theme(include_yaxis = FALSE) +
+  scale_fill_gradientn(colors = c("#e6efe6", "#69af69", "#2c752c"),
+                       values = rescale(c(0, 0.5*max(eigenpept_GU_corr$cor_p_nlog10),
+                                          max(eigenpept_GU_corr$cor_p_nlog10))),
+                       limits = c(0, max(eigenpept_GU_corr$cor_p_nlog10)),
+                          name = "-log10 p-value") +
+  labs(x = "r", y = "Cluster")
+ggsave_pdfpng("output/images/analysis/corr_network/WGCNA/eigenpeptides/bplot_eigenpep_GU_corr",
+              width = 2.75, height = 1.4)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
