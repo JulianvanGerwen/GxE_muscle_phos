@@ -781,6 +781,128 @@ ggVennDiagram_nice(list = insreg_SGIDs_list_common$either,
 ggsave_pdfpng(file = paste(venn_dir, "_either", sep = ""), width = venn_width, height = venn_height)
 ```
 
+
+Needham 2022 Nature Biotech - exercise
+```{r}
+###Exercise regultion factor
+needham_raw$exreg_dir <- "unregulated"
+needham_raw[which(needham_raw$sig_ExBas_RestBas == "+" &
+                    needham_raw$logfc_ExBas_RestBas > 0), "exreg_dir"] <- "up"
+needham_raw[which(needham_raw$sig_ExBas_RestBas == "+" &
+                    needham_raw$logfc_ExBas_RestBas < 0), "exreg_dir"] <- "down"
+
+###List of regulated sites
+insreg_NeedhamEx_SGIDs_list <- map(list("up" = c("up"),
+                              "down" = c("down"),
+                              "either" = c("up", "down")), function(x){
+                                lst <- list("GxE" = subset(phos_data_wneedham, insreg_dir %in% x),
+                                            "needham" = subset(needham_raw, exreg_dir %in% x))
+                                map(lst, ~unique_notNA(.$PSP_SITE_GRP_ID))
+                              })
+insreg_NeedhamEx_SGIDs_list_common <- map(insreg_NeedhamEx_SGIDs_list, function(lst){
+  map(lst, ~intersect(., common_SGIDs))
+})
+```
+
+Hoffman 2015 - exercise
+```{r}
+###Load in and process data
+library(readxl)
+hoffman_rawest <- read_xlsx(paste(home_directory, 
+                                 "data/supplementary_tables/Hoffman_CellMetab_2015/Hoffman2015_S1_humanex.xlsx",
+                                 sep = ""))
+hoffman_raw <- hoffman_rawest
+hoffman_raw$uniprot_site <- strsplit(hoffman_raw$`Phosphorylation position (>90% localization)`, ";") %>%
+  map(~.[1]) %>% unlist #Take the first uniprot_site when there are multiple given
+hoffman_raw[, c("uniprot", "site")] <- strsplit(hoffman_raw$uniprot_site, "_") %>% purrr::reduce(rbind)
+hoffman_raw$site[which(hoffman_raw$site == "NANA")] <- NA
+hoffman_raw <- hoffman_raw[which(!is.na(hoffman_raw$site)), ]
+
+##Assign exreg with dir
+hoffman_raw$exreg_dir <- "unregulated"
+hoffman_raw[which(hoffman_raw$`Significance (+/-1.5-fold and P<0.05)` == "+" &
+                    hoffman_raw$`iTRAQ and TMT Combined Fold-Change` > 0), "exreg_dir"] <- "up"
+hoffman_raw[which(hoffman_raw$`Significance (+/-1.5-fold and P<0.05)` == "+" &
+                    hoffman_raw$`iTRAQ and TMT Combined Fold-Change` < 0), "exreg_dir"] <- "down"
+table(hoffman_raw$exreg_dir)
+
+##Add PSP SITE_GRP_IDs
+#Load in PSP
+hoffman_SGIDs <- uniprotsite_to_sitegroupid(uniprot_sites = hoffman_raw$uniprot_site,
+                                            psp_phos_data = psp_data,
+                                       restrict_to_phos = TRUE)
+hoffman_raw$PSP_SITE_GRP_ID <- unlist(hoffman_SGIDs)
+
+###Map into my data
+phos_data_whoffman <- phos_data_proc_insreg %>%
+  annotation_search_mapback(., annotation_groups = "PSP") %>%
+  .[, c("gene", "uniprot", "site", "multiplicity",
+        "uniprot_site", "standard_name", "PSP_SITE_GRP_ID",
+        "insreg_bool", "insreg_dir")]
+
+###List of regulated sites
+insreg_HoffmanEx_SGIDs_list <- map(list("up" = c("up"),
+                              "down" = c("down"),
+                              "either" = c("up", "down")), function(x){
+                                lst <- list("GxE" = subset(phos_data_wneedham, insreg_dir %in% x),
+                                            "hoffman" = subset(hoffman_raw, exreg_dir %in% x))
+                                map(lst, ~unique_notNA(.$PSP_SITE_GRP_ID))
+                              })
+common_SGIDs <- common_SGIDs <- intersect(unique_notNA(hoffman_raw$PSP_SITE_GRP_ID),
+                          unique_notNA(phos_data_whoffman$PSP_SITE_GRP_ID))
+insreg_HoffmanEx_SGIDs_list_common <- map(insreg_HoffmanEx_SGIDs_list, function(lst){
+  map(lst, ~intersect(., common_SGIDs))
+})
+```
+
+
+Insreg in GxE, and exercise reg in Needham or Hoffman
+```{r}
+##Set up list
+insreg_Ex_SGIDs_list <- insreg_NeedhamEx_SGIDs_list
+insreg_Ex_SGIDs_list <- map2(insreg_Ex_SGIDs_list, insreg_HoffmanEx_SGIDs_list, function(lst, hofflst){
+  lst$hoffman <- hofflst$hoffman
+  return(lst)
+})
+##Only sites quantified in all 3 studies
+GxE_SGIDs <- intersect(unique_notNA(hoffman_raw$PSP_SITE_GRP_ID),
+                          unique_notNA(phos_data_whoffman$PSP_SITE_GRP_ID)) %>%
+  intersect(., unique_notNA(needham_raw$PSP_SITE_GRP_ID))
+insreg_Ex_SGIDs_list_GxEquant <- map(insreg_Ex_SGIDs_list, function(lst){
+  map(lst, ~intersect(., GxE_SGIDs))
+})
+##Venn diagram
+venn_dir <- "output/images/analysis/insulin_regulation/characterisation/vs_Hoffman2015/venn_common_exreg_HoffmanNeedham_"
+venn_width <- 3
+venn_height <- 3
+#either
+ggVennDiagram_nice(list = insreg_Ex_SGIDs_list_GxEquant$either,
+                   colours = brewer.pal(9, "Greys")[1:6],
+                   fill_limits = c(0, NA))
+ggsave_pdfpng(file = paste(venn_dir, "_either", sep = ""), width = venn_width, height = venn_height)
+
+##List of sites as a supp table
+insreg_exreg_summ <- data.frame("SITE_GRP_ID" = intersect(insreg_Ex_SGIDs_list_GxEquant$either$GxE,
+                                                          c(insreg_Ex_SGIDs_list_GxEquant$either$needham,
+                                                            insreg_Ex_SGIDs_list_GxEquant$either$hoffman)))
+insreg_exreg_summ[, c("gene", "uniprot", "site")] <- map(insreg_exreg_summ$SITE_GRP_ID, function(SGID){
+  dat <- subset(phos_data_wneedham, PSP_SITE_GRP_ID == SGID)
+  return(dat[1, c("gene", "uniprot", "site")])
+}) %>% purrr::reduce(rbind)
+insreg_exreg_summ$exreg_needham <- ""
+insreg_exreg_summ$exreg_needham[which(insreg_exreg_summ$SITE_GRP_ID %in%
+                                        insreg_Ex_SGIDs_list_GxEquant$either$needham)] <- "+"
+insreg_exreg_summ$exreg_hoffman <- ""
+insreg_exreg_summ$exreg_hoffman[which(insreg_exreg_summ$SITE_GRP_ID %in%
+                                        insreg_Ex_SGIDs_list_GxEquant$either$hoffman)] <- "+"
+#Reorder
+insreg_exreg_summ <- insreg_exreg_summ %>% .[order(.$exreg_needham, .$exreg_hoffman, decreasing = T), ]
+#Export
+write.csv(insreg_exreg_summ, file = "output/data/analysis/insulin_regulation/exercise_overlap/insregGxE_exregNeedhamHoffman.csv")
+```
+
+
+
 ###Pathway enrichment
 Set up
 ```{r}

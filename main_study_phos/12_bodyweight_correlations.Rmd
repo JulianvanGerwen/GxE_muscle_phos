@@ -1,0 +1,201 @@
+###Background
+Here I correlate phosphorylation with bodyweight
+
+###Initialise
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(qvalue)
+home_directory <- "..\\"
+source(paste(home_directory, "scripts/essential_visualisations_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/boxplots_JvG.R", sep = ""))
+source(paste(home_directory, "scripts/enrichment_analysis_JvG.R", sep = ""))
+source("..\\scripts/01_objects__1.R")
+source("..\\scripts/02_global_functions__1.R")
+source("scripts/02_basic_visualisations.R")
+source("scripts/03_basic_functions.R")
+source("scripts/06_annotation.R")
+source("scripts/10_GU_correlations.R")
+source("scripts/11_enrichment.R")
+
+
+load("data/intermediate/phos_data/annotation/phos_data_annotation__1.RData")
+load("data/intermediate/phos_data/phos_data_proc_insreg__4.RData")
+load("data/intermediate/phos_data/phos_num_cols__1.RData")
+load("data/intermediate/phos_data/data_wNAs_filt__2.RData")
+load("data/intermediate/pheno_data/pheno_data__5.RData")
+phos_num_cols_basnorm <- colnames(phos_data_proc_insreg)[grep("basnorm_\\d+", 
+                                                              colnames(phos_data_proc_insreg))]
+```
+
+
+
+###Set up data
+```{r}
+##Add filtered basnorm FCs to main data
+phos_num_cols_basnormfilt <- gsub("basnorm", "basnormfilt", phos_num_cols_basnorm)
+phos_data_proc_insreg[, phos_num_cols_basnormfilt] <- NA
+phos_data_proc_insreg[rownames(data_wNAs_filt), phos_num_cols_basnormfilt] <- data_wNAs_filt[, phos_num_cols_basnorm]
+```
+
+
+####Correlating insulin-regulated ppeptides with body mass
+Set up data
+```{r}
+###Get insreg data and add annotation
+insreg_data_corrs <- subset(phos_data_proc_insreg, insreg_bool == TRUE) %>%
+  annotation_search_mapback
+```
+
+Run correlation
+```{r}
+#Set up arguments
+corr_args <- list(
+  "bodyweight" = list(
+    "pheno_col" = "bodyweight_final",
+    "StrainDiets_remove" = NULL
+  ),
+  
+  "bodyweight_noHFD" = list(
+    "pheno_col" = "bodyweight_final",
+    "StrainDiets_remove" = all_levels$StrainDiet %>% .[grep("HFD", .)]
+  )
+)
+#Set up parameters
+  pval_cutoff = 0.1
+  r_cutoff = 0.35
+
+###Run correlations
+insreg_corrs_bodycomp_results <- map(corr_args, function(x){
+  #Set up pheno data
+  pheno_data_hack <- pheno_data[, -grep("^sol_", colnames(pheno_data))]
+  pheno_data_hack$sol_p2DG_weightnorm_rate <- pheno_data_hack[, x$pheno_col]
+  
+  #Filter to desired strain-diet combinations
+  phos_col_insresp <- phos_num_cols_basnormfilt
+  phos_col_absint <- phos_num_cols
+  if (!is.null(x$StrainDiets_remove)){
+    for (straindiet in x$StrainDiets_remove){
+      phos_col_insresp <- phos_col_insresp %>% .[-grep(straindiet, .)]
+      phos_col_absint <- phos_col_absint %>% .[-grep(straindiet, .)]
+    }
+  }
+  
+  #Correlate the insulin response (filtered) or absolute intensity
+  insreg_corrs_bodyweight_results <- list(
+    "insresp" = phos_GU_correlator_mult(phos_data = insreg_data_corrs,
+                                        pheno_data = pheno_data_hack,
+                                       phos_num_cols = phos_col_insresp,
+                                       phos_UIDs = gsub("basnormfilt_", "",
+                                                        phos_col_insresp)),
+    "absint" = phos_GU_correlator_mult(phos_data = insreg_data_corrs,
+                                        pheno_data = pheno_data_hack,
+                                       phos_num_cols = phos_col_absint,
+                                       phos_UIDs = phos_col_absint)
+  )
+  
+  #Classify as significantly correlated
+  
+  #Map
+  insreg_corrs_bodyweight_results <- map(insreg_corrs_bodyweight_results,
+                              function(data){
+                                #Correlated with r cutoff
+                                data$correlated <- FALSE
+                                data[which(data[, "cor_q"] < pval_cutoff &
+                                   abs(data[, "cor_r"]) > r_cutoff), "correlated"] <- TRUE
+                                #Correlated without r cutoff
+                                data$correlated_wor <- FALSE
+                                data[which(data[, "cor_q"] < pval_cutoff), "correlated_wor"] <- TRUE
+                                return(data)
+                                })
+  return(insreg_corrs_bodyweight_results)
+})
+```
+
+
+Big numbers
+```{r}
+print("correlated")
+map(insreg_corrs_bodycomp_results, function(lst){
+  map(lst, ~sum(.$correlated))
+})
+
+print("correlated Strain effects")
+pepts <- subset(insreg_corrs_bodycomp_results$bodyweight_noHFD$insresp, correlated == TRUE) %>% rownames
+subset(phos_data_proc_insreg, insregdiff_StrainCHOW_change_bool == TRUE) %>% nrow
+subset(phos_data_proc_insreg, insregdiff_StrainCHOW_change_bool == TRUE &
+         standard_name %in% pepts) %>% nrow
+
+print("correlated Diet effects")
+pepts <- subset(insreg_corrs_bodycomp_results$bodyweight$insresp, correlated == TRUE) %>% rownames
+subset(phos_data_proc_insreg, insregdiff_Dietoverall_change_bool == TRUE) %>% nrow
+subset(phos_data_proc_insreg, insregdiff_Dietoverall_change_bool == TRUE &
+         standard_name %in% pepts) %>% nrow
+
+###Strain and Diet effects: Make summary
+StrainDiet_corr_summ_lst <- list(
+  "Strain" = list(subset(phos_data_proc_insreg, insregdiff_StrainCHOW_change_bool == TRUE),
+                  insreg_corrs_bodycomp_results$bodyweight_noHFD$insresp),
+  "Diet" = list(subset(phos_data_proc_insreg, insregdiff_Dietoverall_change_bool == TRUE),
+                insreg_corrs_bodycomp_results$bodyweight$insresp)
+) %>% map(function(x){
+  #Subset for sites with strain or diet effects
+  corrDat <- x[[2]] %>%
+    .[which(rownames(.) %in% rownames(x[[1]])), ]
+  #Get direction of insulin regulation
+  corrDat$insreg_dir <- x[[1]][rownames(corrDat), "insreg_dir"]
+  #Direction of correlation
+  corrDat$correlated_dir <- "uncorrelated"
+  corrDat$correlated_dir[which(corrDat$correlated == TRUE &
+                                 corrDat$cor_r > 0)] <- "positive"
+  corrDat$correlated_dir[which(corrDat$correlated == TRUE &
+                                 corrDat$cor_r < 0)] <- "negative"
+  corrDat$correlated_dir <- factor(corrDat$correlated_dir,
+                                   levels = c("positive", "negative", "uncorrelated"))
+  return(corrDat)
+})
+StrainDiet_corr_summ <- map2(StrainDiet_corr_summ_lst, names(StrainDiet_corr_summ_lst), function(dat, effect){
+  nums <- table(dat$correlated_dir)
+  sum <- data.frame("num" = nums, 
+                    "correlation"= factor(names(nums),
+                                   levels = c("uncorrelated", "positive", "negative")),
+                    "effect" = effect)
+  return(sum)
+}) %>% purrr::reduce(rbind) %>%
+  mutate(effect = factor(effect, levels = c("Strain", "Diet")))
+```
+
+
+
+
+Plot
+```{r}
+###Summary of Correlations for Strain and Diet effects
+ggplot(StrainDiet_corr_summ, aes(x = effect, y = num.Freq, fill = correlation)) +
+  geom_col() + 
+  scale_fill_manual(values = c("uncorrelated" = "black",
+                               "positive" = "#8ac088",
+                               "negative" = "#86599b")) +
+  comfy_theme(include_xaxis = F, rotate_x_text = T) +
+  labs(y = "# phosphopeptides", x = "Effect on signalling")
+ggsave_pdfpng(file = "output/images/analysis/bodycomp_corrs/bodyweight/bplot_StrainDieteffect_bodyweight_corr",
+              width = 2, height = 1.5)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

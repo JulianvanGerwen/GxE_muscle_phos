@@ -536,7 +536,345 @@ ggsave_pdfpng("output/images/analysis/corr_network/WGCNA/eigenpeptides/bplot_eig
 
 
 
+####Central ppeptides / module membership by eigengene correlation
+```{r}
+###Set up
+##Get module memberships
+MM_matrix <- cor(data_preWGCNA, t(WGCNA_eigenpeptides[, basnorm_cols]),
+    use = "pairwise.complete.obs")
+##Function to extract module memberships
+get_cluster_MMs <- function(cluster){
+  cluster <- as.character(cluster)
+  MM_cluster <- MM_matrix[WGCNA_clusters[[cluster]], 
+                          paste(cluster, "_eigenpept", sep = "")]
+  MM_cluster <- MM_cluster[order(abs(MM_cluster), decreasing = TRUE)]
+  return(MM_cluster)
+}
 
+###Make a summary
+clusters_GU_corr <- strsplit(rownames(eigenpept_GU_corr), "_") %>% map(~.[1]) %>% unlist
+clusters_GU_MM <- map(clusters_GU_corr, function(clust){
+  MM_cluster <- get_cluster_MMs(clust)
+  MM_cluster_df <- data.frame("cluster" = clust, "MM" = MM_cluster)
+}) %>% purrr::reduce(rbind)
+##Add GU corrs
+load("data/intermediate/phos_data/GU_corrs/insreg_corrs_results.RData")
+clusters_GU_MM[, colnames(insreg_corrs_results$insresp)] <- 
+  insreg_corrs_results$insresp[rownames(clusters_GU_MM), ]
+##Add annotation
+clusters_GU_MM <- annotation_search_mapback(clusters_GU_MM)
+
+
+###Export
+write.csv(clusters_GU_MM, file = "output/data/analysis/WGCNA/WGCNA_cluster_summary.csv")
+```
+
+
+#####Enrichment on ranked module membership
+I use ppeptide-eigengene correlation as a measure of module membership
+I perform pathway enrichment on the ranks of these correlations
+
+Set up rank matrix
+```{r}
+MM_matrix_abs <- abs(MM_matrix)
+MM_matrix_rank <- MM_matrix_abs
+MM_matrix_genes <- strsplit(rownames(MM_matrix_abs), "_") %>% map(~.[1]) %>% unlist
+for (j in 1:ncol(MM_matrix_abs)){
+  vec <- MM_matrix_abs[, j]
+  vec <- sort(vec, decreasing = TRUE)
+  MM_matrix_rank[names(vec), j] <- 1:length(vec)
+}
+```
+
+
+GO enrichment
+```{r}
+###Get GO pathways lists
+relevant_GOIDs_gst <- map(c("BP" = "BP", "CC" = "CC"), function(ont){
+  relevant_GOIDs_list <- relevant_GOIDS(DE_genes = unique(unlist(WGCNA_clusters_genes)),
+                                        gene_label = "SYMBOL",
+                                        organism_database = org.Mm.eg.db,
+                                        ontology = ont)
+  #Rename using GO term
+  GO_terms <- AnnotationDbi::select(GO.db,
+                                   names(relevant_GOIDs_list),
+                                   columns = "TERM",
+                                   keytype = "GOID")$TERM
+  names(relevant_GOIDs_list) <- GO_terms
+     return(relevant_GOIDs_list)
+})
+
+
+###Run enrichment
+GO_GST_res <- map(relevant_GOIDs_gst, function(pwayLst){
+  #Run enrichment
+  GO_GST <- map(1:ncol(MM_matrix_abs), function(j){
+    cluster <- gsub("_eigenpept", "", colnames(MM_matrix_abs)[j])
+    enr <- gst_enricher(pathways_list = pwayLst,
+                        stats = MM_matrix_abs[, j],
+                        stats_genes = MM_matrix_genes,
+                        alternative = "greater",
+                        type = "t",
+                        background_pathway_intersection_threshold = 3,
+                        intersection_as_unique = TRUE)
+    colnames(enr) <- paste(cluster, colnames(enr), sep = "_")
+    return(enr)
+  })
+  #Combine into one df
+  common_rows <- rownames(GO_GST[[1]])
+  GO_GST_df <- map(GO_GST, ~.[common_rows, ]) %>% purrr::reduce(cbind) %>% as.data.frame
+  return(GO_GST_df)
+})
+
+
+###Inspect results
+##Num significant (after adjustment in each column)
+map(GO_GST_res, ~colSums(.[, grep("adj_pval$", colnames(.))] < 0.05))
+#No adjustment
+map(GO_GST_res, ~colSums(.[, grep("^[1-8]_pval$", colnames(.))] < 0.01))
+
+##Significant at unadjusted p < 0.01:
+map(GO_GST_res, function(enr){
+  for (j in 1:8){
+    print(j)
+    print(rownames(enr)[which(enr[, paste(j, "_pval", sep = "")] < 0.01)])
+  }
+})
+
+
+###Visualise
+GO_dir <- "output/images/analysis/corr_network/WGCNA/GO/rank/hmap_WGCNA_GOgst_"
+overrep_hmap_pval(data = GO_GST_res$BP,
+                  sig_threshold = 0.01,
+                  pcol_suffix = "^[0-9]_pval$",
+                  conditions = 1:8) +
+  ggtitle("GO Biological Processes")
+ggsave_pdfpng(paste(GO_dir, "BP", sep = ""),
+              width = 5.5, height = 3.5)
+overrep_hmap_pval(data = GO_GST_res$CC,
+                  sig_threshold = 0.01,
+                  pcol_suffix = "^[0-9]_pval$",
+                  conditions = 1:8) +
+  ggtitle("GO Cellular Comartments")
+ggsave_pdfpng(paste(GO_dir, "CC", sep = ""),
+              width = 5.5, height = 3.5)
+```
+
+Kinase enrichment
+```{r}
+###Get SITE_GRP_IDs for membership matrix
+MM_matrix_abs_SGIDs <- phos_data_annotation[rownames(MM_matrix_abs), "PSP_SITE_GRP_ID"]
+
+###Get kinase list
+load("data/intermediate/biol_databases/psp_kin_sub_list_invivo_noauto_Gsk3i__1.RData")
+##Remove promiscuous psites. promisc_threshold = 4 was used for KSEA
+SGIDs <- unique(MM_matrix_abs_SGIDs)
+promisc_bool <- promisc_psites_trim(stat_names = SGIDs,
+                                    kin_sub_list = psp_kin_sub_list_invivo_noauto_Gsk3i,
+                                    promisc_threshold = 4)
+promisc_SGIDs <- SGIDs[!promisc_bool]
+#Remove from kinase sub list
+psp_kin_sub_list_trim <- map(psp_kin_sub_list_invivo_noauto_Gsk3i, function(subs){
+  subs <- subs[which(subs %in% promisc_SGIDs == FALSE)]
+  if (length(subs) == 0){
+    return(NULL)
+  } else {
+    return(subs) 
+  }
+})
+null_bool <- map(psp_kin_sub_list_trim, ~!is.null(.)) %>% unlist
+psp_kin_sub_list_trim <- psp_kin_sub_list_trim[null_bool]
+
+###Run enrichment
+kin_GST_res <- map(1:ncol(MM_matrix_abs), function(j){
+  cluster <- gsub("_eigenpept", "", colnames(MM_matrix_abs)[j])
+  enr <- gst_enricher(pathways_list = psp_kin_sub_list_trim,
+                      stats = MM_matrix_abs[, j],
+                      stats_genes = MM_matrix_abs_SGIDs,
+                      alternative = "greater",
+                      type = "t",
+                      background_pathway_intersection_threshold = 3,
+                      intersection_as_unique = TRUE)
+  colnames(enr) <- paste(cluster, colnames(enr), sep = "_")
+  return(enr)
+})
+#Combine into one df
+common_rows <- rownames(kin_GST_res[[1]])
+kin_GST_df <- map(kin_GST_res, ~.[common_rows, ]) %>% purrr::reduce(cbind) %>% as.data.frame
+
+
+###Inspect results
+##Num significant (after adjustment in each column)
+colSums(kin_GST_df[, grep("adj_pval$", colnames(kin_GST_df))] < 0.05)
+#No adjustment
+colSums(kin_GST_df[, grep("^[1-8]_pval$", colnames(kin_GST_df))] < 0.05)
+
+##Significant at unadjusted p < 0.01:
+for (j in 1:8){
+  print(j)
+  print(rownames(kin_GST_df)[which(kin_GST_df[, paste(j, "_pval", sep = "")] < 0.05)])
+}
+overrep_hmap_pval(data = kin_GST_df,
+                  sig_threshold = 0.05,
+                  pcol_suffix = "^[0-9]_pval$",
+                  conditions = 1:8) +
+  ggtitle("Kinase substrates")
+ggsave_pdfpng("output/images/analysis/corr_network/WGCNA/kinases/rank/hmap_WGCNA_kinGST",
+              width = 4.5, height = 3)
+```
+
+
+
+#####Module membership for GU-correlated ppeptides
+```{r}
+###Set up membership for GU-correlated ppeptides
+load("data/intermediate/phos_data/GU_corrs/insreg_corrs_results.RData") #Load in GU correlations
+MM_matrix_abs_GUcorr <- map(insreg_corrs_results, function(dat){ #Set up module membership
+  mat <- MM_matrix_abs[rownames(subset(dat, correlated == TRUE)), ] %>%
+    as.data.frame
+  return(mat)
+})
+
+###Visualise
+##Heatmaps
+fc_sig_heatmap(MM_matrix_abs_GUcorr$insresp,
+               fc_cols_wo_pvals = paste(1:8, "eigenpept", sep = "_"),
+               x_axis_names = 1:8,
+               clust_cols = paste(1:8, "eigenpept", sep = "_"),
+               legend_title = "Module membership",
+               scale_colours_manually = T,
+               mid_colour_threshold = 0.55,
+               high_colour_threshold = 1) +
+  ggtitle("Insulin response-correlated phosphopeptides")
+ggsave_pdfpng(file = "output/images/analysis/corr_network/WGCNA/GU_corr/hmap_moduleMemb_insrespcorr",
+              width = 4, height = 3)
+fc_sig_heatmap(MM_matrix_abs_GUcorr$absint,
+               fc_cols_wo_pvals = paste(1:8, "eigenpept", sep = "_"),
+               x_axis_names = 1:8,
+               clust_cols = paste(1:8, "eigenpept", sep = "_"),
+               legend_title = "Module membership",
+               scale_colours_manually = T,
+               mid_colour_threshold = 0.55,
+               high_colour_threshold = 1) +
+  ggtitle("Insulin-stimulated intensity-correlated phosphopeptides")
+ggsave_pdfpng(file = "output/images/analysis/corr_network/WGCNA/GU_corr/hmap_moduleMemb_absintcorr",
+              width = 4, height = 5)
+```
+
+
+
+#####Strain and Diet tests on eigenpeptides
+Set up
+```{r}
+phos_num_cols_basnorm <- colnames(phos_data_proc_insreg)[grep("basnorm_\\d+", 
+                                                              colnames(phos_data_proc_insreg))]
+
+source("scripts/08_ins_reg.R")
+```
+
+Strain effects
+```{r}
+##Run ANOVAs
+data_CHOWaov <- ppeptide_stat_runner(WGCNA_eigenpeptides,
+                                 num_cols = phos_num_cols_basnorm[grep("CHOW", phos_num_cols_basnorm)],
+                                 test_func = strain_CHOW_aov,
+                                 results_format = c("p", "F"))
+#Adjust pvals
+data_CHOWaov$q <- p.adjust(data_CHOWaov$p, method = "fdr")
+data_CHOWaov$sig <- data_CHOWaov$q < 0.05
+colnames(data_CHOWaov) <- paste("Strainaov_", colnames(data_CHOWaov), sep = "")
+
+##Posthoc tests
+#Set up
+comparisons <- paste(all_levels$Strain[all_levels$Strain != "C57Bl6J"], "_vs_C57Bl6J", sep = "")
+results_cols <- cross(list(c("p", "t"), comparisons)) %>%
+  map(~paste(rev(unlist(.)), collapse = "_")) %>% unlist
+test_func <- Strain_C57Bl6J_ttests
+ppeptides <- rownames(subset(data_CHOWaov, Strainaov_sig == TRUE))
+#Run ttests
+data_CHOWaov_phoc <- ppeptide_stat_runner(WGCNA_eigenpeptides[ppeptides, ],
+                             num_cols = phos_num_cols_basnorm[grep("CHOW", phos_num_cols_basnorm)],
+                             test_func = test_func,
+                             results_format = results_cols)
+#Adjust pvalues
+data_CHOWaov_phoc_adj <- p.adjust_mult_cols(data_CHOWaov_phoc, 
+                                        pval_cols = colnames(data_CHOWaov_phoc) %>% .[grep("_p$", .)])
+colnames(data_CHOWaov_phoc_adj) <- paste(colnames(data_CHOWaov_phoc_adj), "adj", sep = "")
+data_CHOWaov_phoc_adj[, gsub("_padj$", "_sig", colnames(data_CHOWaov_phoc_adj))] <- data_CHOWaov_phoc_adj < 0.05
+data_CHOWaov_phoc <- cbind(data_CHOWaov_phoc, data_CHOWaov_phoc_adj)
+
+##Overall summary
+eigenpept_Straineffect_df <- data_CHOWaov_phoc
+eigenpept_Straineffect_df[setdiff(rownames(data_CHOWaov), rownames(data_CHOWaov_phoc)), ] <- NA
+eigenpept_Straineffect_df[setdiff(rownames(data_CHOWaov), rownames(data_CHOWaov_phoc)), 
+                           grep("_sig$", colnames(eigenpept_Straineffect_df))] <- FALSE
+eigenpept_Straineffect_sum <- eigenpept_Straineffect_df %>% .[, grep("_sig$", colnames(.))]
+#Stars
+eigenpept_Straineffect_df %>% .[, grep("_padj$", colnames(.))] %>% ps_to_stars_df
+```
+
+Diet effects
+```{r}
+##Run ANOVAs
+data_regdiff <- ppeptide_stat_runner(WGCNA_eigenpeptides,
+                                     num_cols = phos_num_cols_basnorm,
+                                     test_func = strainxdiet_aov,
+                                     results_format = c("Strain_p", "Diet_p", "StrainxDiet_p",
+                                                        "Strain_F", "Diet_F", "StrainxDiet_F")) %>%
+  .[, -grep("Strain_", colnames(.))]
+#p-value adjustment across all columns
+conditions <- c("Diet", "StrainxDiet")
+pcols <- paste(conditions, "_p", sep = "")
+qcols <- paste(conditions, "_q", sep = "")
+sig_cols <- paste(conditions, "_sig", sep = "")
+#adjusted p-values
+qvalues <- p.adjust_mult_cols(data_regdiff[, pcols], pval_cols = pcols, method = "fdr")
+data_regdiff[, qcols] <- qvalues
+#Significance
+for (i in 1:length(pcols)){
+  data_regdiff[, sig_cols[i]] <- FALSE
+  data_regdiff[which(data_regdiff[, qcols[i]] < 0.05), sig_cols[i]] <- TRUE
+}
+#Make a column for which posthoc tests will be performed
+#This is:
+#StrainxDiet always if StrainxDiet is significant. Otherwise:
+#Diet if Diet is signifciant only
+#Classify each as S, D, SxD, S+D
+data_regdiff$posthoc_class <- "none"
+data_regdiff$posthoc_class[data_regdiff$Diet_sig] <- "Diet"
+data_regdiff$posthoc_class[data_regdiff$StrainxDiet_sig] <- "StrainxDiet"
+data_regdiff$posthoc_class <- factor(data_regdiff$posthoc_class,
+                                     levels = c("none", "StrainxDiet", "Diet"))
+data_Diet_SxDaov <- data_regdiff
+
+##Run posthocs
+diet_comparisons <- map(all_levels$Strain, ~paste(., "_HFD_vs_", ., "_CHOW", sep = "")) %>% unlist
+results_cols <- cross(list(c("p", "t"), diet_comparisons)) %>%
+  map(~paste(rev(unlist(.)), collapse = "_")) %>% unlist
+test_func <- StrainxDiet_Diet_ttests
+ppeptides <- rownames(subset(data_Diet_SxDaov, posthoc_class == "StrainxDiet"))
+#Run ttests
+data_Diet_SxDaov_SxDttests <- ppeptide_stat_runner(WGCNA_eigenpeptides[ppeptides, ],
+                             num_cols = phos_num_cols_basnorm,
+                             test_func = test_func,
+                             results_format = results_cols)
+#Adjust pvalues
+data_Diet_SxDaov_SxDttests_adj <- p.adjust_mult_cols(data_Diet_SxDaov_SxDttests, 
+                                        pval_cols = colnames(data_Diet_SxDaov_SxDttests) %>% .[grep("_p$", .)])
+colnames(data_Diet_SxDaov_SxDttests_adj) <- paste(colnames(data_Diet_SxDaov_SxDttests_adj), "adj", sep = "")
+data_Diet_SxDaov_SxDttests_adj[, gsub("_padj$", "_sig", colnames(data_Diet_SxDaov_SxDttests_adj))] <- data_Diet_SxDaov_SxDttests_adj < 0.05
+data_Diet_SxDaov_SxDttests <- cbind(data_Diet_SxDaov_SxDttests, data_Diet_SxDaov_SxDttests_adj)
+
+##Overall summary
+eigenpept_StrainxDieteffect_df <- data_Diet_SxDaov_SxDttests
+eigenpept_StrainxDieteffect_df[setdiff(rownames(data_Diet_SxDaov), rownames(data_Diet_SxDaov_SxDttests)), ] <- NA
+eigenpept_StrainxDieteffect_df[setdiff(rownames(data_Diet_SxDaov), rownames(data_Diet_SxDaov_SxDttests)), 
+                           grep("_sig$", colnames(eigenpept_StrainxDieteffect_df))] <- FALSE
+eigenpept_StrainxDieteffect_sum <- eigenpept_StrainxDieteffect_df %>% .[, grep("_sig$", colnames(.))]
+eigenpept_StrainxDieteffect_sum <- eigenpept_StrainxDieteffect_sum[order(rownames(eigenpept_StrainxDieteffect_sum)), ]
+#Stars
+eigenpept_StrainxDieteffect_df %>% .[, grep("_padj$", colnames(.))] %>% ps_to_stars_df
+```
 
 
 
